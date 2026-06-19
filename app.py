@@ -2,6 +2,7 @@ import hashlib
 import re
 import sys
 import types
+from dataclasses import dataclass
 from pathlib import Path
 
 # GitHub web upload can accidentally flatten package folders. If the engine
@@ -28,7 +29,21 @@ import streamlit as st
 import pandas as pd
 from container_optimizer.cargo import product_rows_to_cargo_items
 from container_optimizer.containers import get_container_spec
-from container_optimizer.models import LoadingConfig
+import container_optimizer.models as optimizer_models
+
+if not hasattr(optimizer_models, "LoadingConfig"):
+    @dataclass(frozen=True)
+    class LoadingConfig:
+        load_direction: str = "inside_out"
+        heavy_priority: str = "heavy_bottom"
+        placement_strategy: str = "stable_floor_first"
+        max_additional_containers: int = 10
+        minimum_support_ratio: float = 0.65
+
+    optimizer_models.LoadingConfig = LoadingConfig
+else:
+    LoadingConfig = optimizer_models.LoadingConfig
+
 from container_optimizer.optimization import optimize_loading
 from container_optimizer.reporting import container_summary_df, detail_plan_df, summarize_container
 from container_optimizer.visualization import build_container_figure
@@ -80,7 +95,18 @@ if 'max_additional_containers' not in st.session_state:
 def calculate_loading_cached(products, selected_container, custom_dims, selected_quantity, loading_config):
     items = product_rows_to_cargo_items(products)
     spec = get_container_spec(selected_container, custom_dims)
-    return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True, config=loading_config)
+    try:
+        return optimize_loading(
+            items,
+            spec,
+            selected_quantity=selected_quantity,
+            allow_auto_add=True,
+            config=loading_config,
+        )
+    except TypeError as exc:
+        if "config" not in str(exc):
+            raise
+        return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True)
 
 
 def render_color_summary_table(rows):
