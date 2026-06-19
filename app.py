@@ -39,6 +39,7 @@ if not hasattr(optimizer_models, "LoadingConfig"):
         placement_strategy: str = "stable_floor_first"
         max_additional_containers: int = 10
         minimum_support_ratio: float = 0.65
+        contact_compaction: bool = True
 
     optimizer_models.LoadingConfig = LoadingConfig
 else:
@@ -89,6 +90,10 @@ if 'placement_strategy' not in st.session_state:
     st.session_state.placement_strategy = "stable_floor_first"
 if 'max_additional_containers' not in st.session_state:
     st.session_state.max_additional_containers = 10
+if 'contact_compaction' not in st.session_state:
+    st.session_state.contact_compaction = True
+if 'minimum_support_ratio' not in st.session_state:
+    st.session_state.minimum_support_ratio = 0.65
 
 
 @st.cache_data(show_spinner=False)
@@ -137,6 +142,13 @@ def render_color_summary_table(rows):
         )
     html.append("</tbody></table>")
     st.markdown("".join(html), unsafe_allow_html=True)
+
+
+def make_loading_config(**kwargs):
+    fields = getattr(LoadingConfig, "__dataclass_fields__", {})
+    if fields:
+        kwargs = {key: value for key, value in kwargs.items() if key in fields}
+    return LoadingConfig(**kwargs)
 
 # --- CLICKABLE TAB NAVIGATION ---
 nav_cols = st.columns(3)
@@ -522,7 +534,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
 
     st.write("---")
     st.subheader("Loading Configuration")
-    config_cols = st.columns(4)
+    config_cols = st.columns(6)
     with config_cols[0]:
         direction_labels = {
             "inside_out": "Inside to door",
@@ -568,6 +580,21 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             value=int(st.session_state.max_additional_containers),
             step=1
         )
+    with config_cols[4]:
+        st.session_state.contact_compaction = st.checkbox(
+            "Contact compaction",
+            value=bool(st.session_state.contact_compaction),
+            help="Force loaded cargo to settle downward and close gaps along the loading direction."
+        )
+    with config_cols[5]:
+        st.session_state.minimum_support_ratio = st.slider(
+            "Support ratio",
+            min_value=0.1,
+            max_value=1.0,
+            value=float(st.session_state.minimum_support_ratio),
+            step=0.05,
+            help="Minimum footprint overlap required before one package is considered supported by another."
+        )
 
     # Step 2 navigation controls
     st.write("---")
@@ -597,11 +624,13 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         st.stop()
 
     custom_dims = st.session_state.get("custom_dims", {"l": 6000, "w": 2400, "h": 2400, "m": 25000})
-    loading_config = LoadingConfig(
+    loading_config = make_loading_config(
         load_direction=st.session_state.load_direction,
         heavy_priority=st.session_state.heavy_priority,
         placement_strategy=st.session_state.placement_strategy,
         max_additional_containers=int(st.session_state.max_additional_containers),
+        minimum_support_ratio=float(st.session_state.minimum_support_ratio),
+        contact_compaction=bool(st.session_state.contact_compaction),
     )
 
     try:

@@ -98,3 +98,4 @@ class LoadingConfig:
     placement_strategy: str = "stable_floor_first"
     max_additional_containers: int = 10
     minimum_support_ratio: float = 0.65
+    contact_compaction: bool = True

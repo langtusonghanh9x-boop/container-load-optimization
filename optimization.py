@@ -22,7 +22,8 @@ def _pack_fixed_specs(specs, items, config):
 def _pack_repeating_spec(spec, items, config):
     containers = []
     remaining = list(items)
-    while remaining and len(containers) < config.max_additional_containers:
+    max_additional = getattr(config, "max_additional_containers", 10)
+    while remaining and len(containers) < max_additional:
         packed, next_remaining = pack_container(
             spec,
             remaining,
