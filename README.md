@@ -9,6 +9,21 @@ Streamlit web app for 3D container loading optimization.
 - Check loaded packages, volume usage, payload usage, and leftover cargo.
 - Suggest additional standard containers when the selected container is not enough.
 - Show a final loading plan per container.
+- Support multiple selected containers and automatic additional containers.
+- Support Lumber Bundle cargo in inches with automatic conversion to millimeters.
+- Download loading-plan CSV output.
+
+## Architecture
+
+The Streamlit entrypoint stays in `app.py`, while long-term business logic lives in independent modules:
+
+- `container_optimizer/packing.py`: packing engine based on `py3dbp`.
+- `container_optimizer/containers.py`: container catalog and custom container specs.
+- `container_optimizer/manager.py`: selected and automatically added container management.
+- `container_optimizer/optimization.py`: multi-container optimization strategy.
+- `container_optimizer/visualization.py`: Plotly 3D rendering.
+- `container_optimizer/reporting.py`: tabular report generation.
+- `container_optimizer/cargo.py`: cargo conversion, including Lumber Bundle inch-to-mm handling.
 
 ## Required Columns
 
@@ -31,6 +46,7 @@ streamlit run app.py
 1. Create a new GitHub repository, for example `container-optimization`.
 2. Upload these files to the repository:
    - `app.py`
+   - `container_optimizer/`
    - `requirements.txt`
    - `runtime.txt`
    - `sample_products.csv`

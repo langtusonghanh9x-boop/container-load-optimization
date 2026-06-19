@@ -1,11 +1,12 @@
 ﻿import hashlib
 import re
-from decimal import Decimal
-from itertools import permutations
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from py3dbp import Packer, Bin, Item
+from container_optimizer.cargo import product_rows_to_cargo_items
+from container_optimizer.containers import get_container_spec
+from container_optimizer.optimization import optimize_loading
+from container_optimizer.reporting import container_summary_df, detail_plan_df, summarize_container
+from container_optimizer.visualization import build_container_figure
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Container Load 3D Optimization", layout="wide")
@@ -17,9 +18,9 @@ if 'current_tab' not in st.session_state:
 # 2. Initialize default product list
 if 'product_list' not in st.session_state:
     st.session_state.product_list = [
-        {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71"},
-        {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6"},
-        {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db"}
+        {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+        {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+        {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
     ]
 # Force product row widgets to refresh when imported data changes
 if 'product_list_version' not in st.session_state:
@@ -36,6 +37,17 @@ CONTAINER_DICT = {
 # Keep the selected container across screens
 if 'selected_container' not in st.session_state:
     st.session_state.selected_container = "40' High-Cube (40HQ)"
+if 'selected_container_quantity' not in st.session_state:
+    st.session_state.selected_container_quantity = 1
+if 'calculation_requested' not in st.session_state:
+    st.session_state.calculation_requested = False
+
+
+@st.cache_data(show_spinner=False)
+def calculate_loading_cached(products, selected_container, custom_dims, selected_quantity):
+    items = product_rows_to_cargo_items(products)
+    spec = get_container_spec(selected_container, custom_dims)
+    return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True)
 
 # --- CLICKABLE TAB NAVIGATION ---
 nav_cols = st.columns(3)
@@ -186,7 +198,7 @@ if st.session_state.current_tab == "PRODUCTS":
 
         return best_df if best_df is not None else pd.DataFrame()
     def clear_product_input_state():
-        prefixes = ("name_", "l_", "w_", "h_", "wt_", "qty_", "color_", "del_")
+        prefixes = ("name_", "type_", "l_", "w_", "h_", "wt_", "qty_", "color_", "del_")
         for key in list(st.session_state.keys()):
             if key.startswith(prefixes):
                 del st.session_state[key]
@@ -247,8 +259,7 @@ if st.session_state.current_tab == "PRODUCTS":
                 missing = [key for key, value in required.items() if value is None]
 
                 if missing:
-                    st.error("Error")
-                    st.stop()
+                    raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
                 df = df.dropna(how="all")
                 imported_products = []
@@ -296,10 +307,11 @@ if st.session_state.current_tab == "PRODUCTS":
                         "h": parse_number(row[col_hei]),
                         "wt": parse_number(row[col_wt]),
                         "qty": parse_number(row[col_qty]),
-                        "color": colors[len(imported_products) % len(colors)]
+                        "color": colors[len(imported_products) % len(colors)],
+                        "cargo_type": "General Cargo"
                     })
                 if not imported_products:
-                    st.error("Error")
+                    st.warning("No valid product rows were found in the uploaded file.")
                 else:
                     clear_product_input_state()
                     st.session_state.product_list = imported_products
@@ -309,15 +321,16 @@ if st.session_state.current_tab == "PRODUCTS":
                     st.rerun()
 
             except Exception as e:
-                st.error("Error")
+                st.warning(f"Could not import this file: {e}")
 
     if st.session_state.get("import_success_message"):
         st.success(st.session_state.import_success_message)
-    col_h1, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.5, 1.2, 1.2, 1.2, 1.2, 1.2, 1, 0.5])
+    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
     with col_h1: st.markdown("**Product Name**")
-    with col_h2: st.markdown("**Length (mm)**")
-    with col_h3: st.markdown("**Width (mm)**")
-    with col_h4: st.markdown("**Height (mm)**")
+    with col_h_type: st.markdown("**Cargo Type**")
+    with col_h2: st.markdown("**Length**")
+    with col_h3: st.markdown("**Width**")
+    with col_h4: st.markdown("**Height**")
     with col_h5: st.markdown("**Weight (kg)**")
     with col_h6: st.markdown("**Quantity**")
     with col_h7: st.markdown("**Color**")
@@ -329,19 +342,23 @@ if st.session_state.current_tab == "PRODUCTS":
     
     product_key_version = st.session_state.product_list_version
     for i, prod in enumerate(st.session_state.product_list):
-        cols = st.columns([2.5, 1.2, 1.2, 1.2, 1.2, 1.2, 1, 0.5])
+        cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
-        l = cols[1].number_input("", value=prod["l"], step=10, key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
-        w = cols[2].number_input("", value=prod["w"], step=10, key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
-        h = cols[3].number_input("", value=prod["h"], step=10, key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
-        wt = cols[4].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
-        qty = cols[5].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
-        color = cols[6].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
+        cargo_type_options = ["General Cargo", "Lumber Bundle"]
+        current_cargo_type = prod.get("cargo_type", "General Cargo")
+        cargo_type = cols[1].selectbox("", cargo_type_options, index=cargo_type_options.index(current_cargo_type) if current_cargo_type in cargo_type_options else 0, key=f"type_{product_key_version}_{i}", label_visibility="collapsed")
+        dim_step = 1 if cargo_type == "Lumber Bundle" else 10
+        l = cols[2].number_input("", value=prod["l"], step=dim_step, key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
+        w = cols[3].number_input("", value=prod["w"], step=dim_step, key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
+        h = cols[4].number_input("", value=prod["h"], step=dim_step, key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
+        wt = cols[5].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
+        qty = cols[6].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
+        color = cols[7].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
         
-        if cols[7].button("Delete", key=f"del_{product_key_version}_{i}"):
+        if cols[8].button("Delete", key=f"del_{product_key_version}_{i}"):
             to_delete = i
             
-        temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color})
+        temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
 
     if to_delete is not None:
         temp_list.pop(to_delete)
@@ -353,10 +370,29 @@ if st.session_state.current_tab == "PRODUCTS":
         st.session_state.product_list = temp_list
 
     st.write("")
-    if st.button("Add Product"):
-        st.session_state.product_list.append({"name": "New Item", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 1, "color": "#e74c3c"})
-        st.session_state.product_list_version += 1
-        st.rerun()
+    add_cols = st.columns([1.2, 1.5, 1.5, 6])
+    with add_cols[0]:
+        if st.button("Add Product"):
+            st.session_state.product_list.append({"name": "New Item", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 1, "color": "#e74c3c", "cargo_type": "General Cargo"})
+            st.session_state.product_list_version += 1
+            st.rerun()
+    with add_cols[1]:
+        if st.button("Add Lumber Bundle"):
+            st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
+            st.session_state.product_list_version += 1
+            st.rerun()
+    with add_cols[2]:
+        if st.button("Reset All"):
+            st.session_state.product_list = [
+                {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+                {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+                {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
+            ]
+            st.session_state.product_list_version += 1
+            st.session_state.calculation_requested = False
+            clear_product_input_state()
+            st.rerun()
+    st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
 
     # Move from step 1 to step 2
     st.write("---")
@@ -387,6 +423,14 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         st.session_state.custom_dims["h"] = st.number_input("Custom height (mm)", value=st.session_state.custom_dims["h"])
         st.session_state.custom_dims["m"] = st.number_input("Custom max payload (kg)", value=st.session_state.custom_dims["m"])
 
+    st.session_state.selected_container_quantity = st.number_input(
+        "Number of selected containers:",
+        min_value=1,
+        max_value=20,
+        value=int(st.session_state.selected_container_quantity),
+        step=1
+    )
+
     # Step 2 navigation controls
     st.write("---")
     col_nav1, col_nav2, _ = st.columns([1.5, 2, 8.5])
@@ -395,7 +439,8 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             st.session_state.current_tab = "PRODUCTS"
             st.rerun()
     with col_nav2:
-        if st.button("Next to Result", type="primary"):
+        if st.button("Calculate Loading", type="primary"):
+            st.session_state.calculation_requested = True
             st.session_state.current_tab = "STUFFING RESULT"
             st.rerun()
 
@@ -404,356 +449,87 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
 # SCREEN 3: STUFFING RESULT (3D SIMULATION)
 # ==========================================
 elif st.session_state.current_tab == "STUFFING RESULT":
-    
-    # Use the container settings selected in step 2
-    c_type = st.session_state.selected_container
-    if c_type != "Custom":
-        c_l, c_w, c_h, c_m = CONTAINER_DICT[c_type]["l"], CONTAINER_DICT[c_type]["w"], CONTAINER_DICT[c_type]["h"], CONTAINER_DICT[c_type]["m"]
-    else:
-        c_l, c_w, c_h, c_m = st.session_state.custom_dims["l"], st.session_state.custom_dims["w"], st.session_state.custom_dims["h"], st.session_state.custom_dims["m"]
+    st.subheader("Step 3: Loading Result")
 
-    def to_float(value):
-        return float(value) if isinstance(value, Decimal) else float(value)
+    if not st.session_state.calculation_requested:
+        st.info("Choose container settings, then click Calculate Loading to run the optimization.")
+        if st.button("Back to Containers"):
+            st.session_state.current_tab = "CONTAINERS & TRUCKS"
+            st.rerun()
+        st.stop()
 
-    def container_volume(dims):
-        return (float(dims["l"]) * float(dims["w"]) * float(dims["h"])) / 1e9
+    custom_dims = st.session_state.get("custom_dims", {"l": 6000, "w": 2400, "h": 2400, "m": 25000})
 
-    def item_volume(item):
-        return to_float(item.width) * to_float(item.height) * to_float(item.depth)
-
-    def clone_item(item):
-        return Item(item.name, item.width, item.height, item.depth, item.weight)
-
-    def item_base_name(item):
-        return item.name.split(" #")[0]
-
-    def can_fit_dimensions(item, dims):
-        item_dims = [to_float(item.width), to_float(item.height), to_float(item.depth)]
-        limit_dims = [float(dims["l"]), float(dims["w"]), float(dims["h"])]
-        return any(all(rotated[index] <= limit_dims[index] for index in range(3)) for rotated in permutations(item_dims))
-
-    def oversize_reason(item, dims):
-        reasons = []
-        if not can_fit_dimensions(item, dims):
-            reasons.append("vượt kích thước")
-        if to_float(item.weight) > float(dims["m"]):
-            reasons.append("vượt tải trọng")
-        return ", ".join(reasons)
-
-    def sort_pack_items(items):
-        return sorted(
-            [clone_item(item) for item in items],
-            key=lambda item: (to_float(item.weight), item_volume(item)),
-            reverse=True
-        )
-
-    def pack_once(container_name, dims, items):
-        packer = Packer()
-        active = Bin(container_name, dims["l"], dims["w"], dims["h"], dims["m"])
-        active.format_numbers(3)
-        packer.add_bin(active)
-        for item in sort_pack_items(items):
-            item.format_numbers(3)
-            packer.pack_to_bin(active, item)
-        return active
-
-    def pack_across_containers(container_name, dims, items):
-        remaining = [clone_item(item) for item in items]
-        bins = []
-        while remaining:
-            packed_bin = pack_once(container_name, dims, remaining)
-            if not packed_bin.items:
-                return None, remaining
-            bins.append(packed_bin)
-            fitted_names = set(item.name for item in packed_bin.items)
-            remaining = [item for item in remaining if item.name not in fitted_names]
-        return bins, []
-
-    def bin_usage(packed_bin, dims):
-        used_volume = sum(item_volume(item) for item in packed_bin.items) / 1e9
-        used_weight = sum(to_float(item.weight) for item in packed_bin.items)
-        max_volume = container_volume(dims)
-        max_weight = float(dims["m"])
-        return {
-            "volume": used_volume,
-            "weight": used_weight,
-            "volume_pct": (used_volume / max_volume * 100) if max_volume else 0,
-            "weight_pct": (used_weight / max_weight * 100) if max_weight else 0
-        }
-
-    def summarize_items(items):
-        rows = []
-        for p in st.session_state.product_list:
-            fitted_count = sum(1 for idx in items if item_base_name(idx) == p["name"])
-            row_volume = (float(p["l"]) * float(p["w"]) * float(p["h"]) * fitted_count) / 1e9
-            row_weight = float(p["wt"]) * fitted_count
-            rows.append({
-                "Name": p["name"],
-                "Packages": fitted_count,
-                "Volume": row_volume,
-                "Weight": row_weight,
-                "Color": p["color"]
-            })
-        return rows
-
-    selected_dims = {"l": c_l, "w": c_w, "h": c_h, "m": c_m}
-    all_items = []
-    for item in st.session_state.product_list:
-        for q in range(int(item["qty"])):
-            all_items.append(Item(f"{item['name']} #{q+1}", item["l"], item["w"], item["h"], item["wt"]))
-
-    active_bin = pack_once(c_type, selected_dims, all_items)
-    fitted_items = active_bin.items
-    unfitted_items = [clone_item(item) for item in active_bin.unfitted_items]
-    total_requested_packages = len(all_items)
-    loaded_packages = len(fitted_items)
-
-    primary_usage = bin_usage(active_bin, selected_dims)
-    total_container_vol = container_volume(selected_dims)
-    total_cargo_vol = primary_usage["volume"]
-    total_cargo_weight = primary_usage["weight"]
-    vol_efficiency = primary_usage["volume_pct"]
-    weight_efficiency = primary_usage["weight_pct"]
-
-    oversized_selected = [
-        {"name": item.name, "reason": oversize_reason(item, selected_dims)}
-        for item in unfitted_items
-        if oversize_reason(item, selected_dims)
-    ]
-
-    feasible_extra_options = []
-    impossible_extra_items = []
-    if unfitted_items:
-        for item in unfitted_items:
-            fits_any_catalog = any(
-                can_fit_dimensions(item, dims) and to_float(item.weight) <= float(dims["m"])
-                for dims in CONTAINER_DICT.values()
+    try:
+        with st.spinner("Calculating optimized loading plan..."):
+            loading_plan = calculate_loading_cached(
+                st.session_state.product_list,
+                st.session_state.selected_container,
+                custom_dims,
+                int(st.session_state.selected_container_quantity)
             )
-            if not fits_any_catalog:
-                impossible_extra_items.append(item)
+    except Exception as exc:
+        st.warning("Could not complete the optimization with the current data.")
+        st.info("Check cargo dimensions, quantities, and weights. You can also reduce the lot size or try a larger container.")
+        st.caption(f"Technical detail: {exc}")
+        loading_plan = None
 
-        if not impossible_extra_items:
-            for name, dims in CONTAINER_DICT.items():
-                extra_bins, extra_leftover = pack_across_containers(name, dims, unfitted_items)
-                if extra_bins and not extra_leftover:
-                    feasible_extra_options.append({
-                        "name": name,
-                        "dims": dims,
-                        "bins": extra_bins,
-                        "count": len(extra_bins),
-                        "capacity": container_volume(dims)
-                    })
+    if loading_plan is None:
+        action_cols = st.columns([1.2, 1.4, 6])
+        with action_cols[0]:
+            if st.button("Back", use_container_width=True):
+                st.session_state.current_tab = "CONTAINERS & TRUCKS"
+                st.rerun()
+        with action_cols[1]:
+            if st.button("Reset All", use_container_width=True):
+                st.session_state.calculation_requested = False
+                st.cache_data.clear()
+                st.session_state.current_tab = "PRODUCTS"
+                st.rerun()
+        st.stop()
 
-    best_extra_option = None
-    if feasible_extra_options:
-        best_extra_option = sorted(feasible_extra_options, key=lambda option: (option["count"], option["capacity"]))[0]
-
-    final_container_plans = [{"name": c_type, "dims": selected_dims, "bin": active_bin, "role": "Selected"}]
-    if best_extra_option:
-        for index, packed_bin in enumerate(best_extra_option["bins"], start=1):
-            final_container_plans.append({
-                "name": best_extra_option["name"],
-                "dims": best_extra_option["dims"],
-                "bin": packed_bin,
-                "role": f"Additional {index}"
-            })
-
-    final_loaded_items = []
-    for plan in final_container_plans:
-        final_loaded_items.extend(plan["bin"].items)
-    final_loaded_packages = len(final_loaded_items)
-    final_leftover_count = total_requested_packages - final_loaded_packages
-
-    summary_rows = summarize_items(fitted_items)
-    volume_pct = vol_efficiency
-    weight_pct = weight_efficiency
-    loaded_rows = [row for row in summary_rows if row["Packages"] > 0]
-
-    st.markdown(f"""
-    <div style="display:flex; align-items:center; justify-content:space-between; border:1px solid #e5ebf3; border-radius:8px 8px 0 0; padding:18px 22px; background:#fff;">
-        <div style="font-size:18px; font-weight:700; color:#2f3742;">{c_type.upper()}</div>
-        <div style="font-size:17px; font-weight:600; color:#9aacc1;">Cargo volume: {total_cargo_vol:.2f} m3</div>
-        <div style="font-size:17px; font-weight:600; color:#9aacc1;">Cargo weight: {total_cargo_weight:.2f} kg</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    fig_3d = go.Figure()
-
-    def hex_to_rgba(hex_color, opacity):
-        clean = hex_color.lstrip("#")
-        r, g, b = tuple(int(clean[i:i+2], 16) for i in (0, 2, 4))
-        return f"rgba({r},{g},{b},{opacity})"
-
-    def add_box_edges(fig, x, y, z, dx, dy, dz, color, width=2):
-        points = [
-            (x, y, z), (x+dx, y, z), (x+dx, y+dy, z), (x, y+dy, z),
-            (x, y, z+dz), (x+dx, y, z+dz), (x+dx, y+dy, z+dz), (x, y+dy, z+dz)
-        ]
-        edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
-        xs, ys, zs = [], [], []
-        for a, b in edges:
-            xs += [points[a][0], points[b][0], None]
-            ys += [points[a][1], points[b][1], None]
-            zs += [points[a][2], points[b][2], None]
-        fig.add_trace(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color=color, width=width), showlegend=False, hoverinfo="skip"))
-
-    def draw_cube(fig, x, y, z, dx, dy, dz, color, name, opacity=1.0, edge_color="rgba(255,255,255,0.45)"):
-        fig.add_trace(go.Mesh3d(
-            x=[x, x+dx, x+dx, x, x, x+dx, x+dx, x],
-            y=[y, y, y+dy, y+dy, y, y, y+dy, y+dy],
-            z=[z, z, z, z, z+dz, z+dz, z+dz, z+dz],
-            i=[7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2],
-            j=[3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 7],
-            k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 2, 6],
-            color=color,
-            opacity=opacity,
-            name=name,
-            showlegend=False,
-            lighting=dict(ambient=0.48, diffuse=0.8, specular=0.25, roughness=0.45),
-            lightposition=dict(x=0, y=-4000, z=5000)
-        ))
-        add_box_edges(fig, x, y, z, dx, dy, dz, edge_color, width=2)
-
-    # Container frame and floor
-    draw_cube(fig_3d, 0, 0, 0, c_l, c_w, 18, "rgba(230,160,30,0.8)", "Floor", opacity=0.82, edge_color="rgba(220,150,20,0.8)")
-    add_box_edges(fig_3d, 0, 0, 0, c_l, c_w, c_h, "rgba(110,124,140,0.45)", width=5)
-
-    for fitted_item in fitted_items:
-        base_name = item_base_name(fitted_item)
-        item_color = next((p["color"] for p in st.session_state.product_list if p["name"] == base_name), "#7f8c8d")
-        x, y, z = [float(coord) for coord in fitted_item.position]
-        dx, dy, dz = [float(dim) for dim in fitted_item.get_dimension()]
-        draw_cube(fig_3d, x, y, z, dx, dy, dz, item_color, fitted_item.name, opacity=1.0, edge_color=hex_to_rgba(item_color, 0.55))
-
-    fig_3d.update_layout(
-        scene=dict(
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            zaxis=dict(visible=False),
-            camera=dict(eye=dict(x=1.7, y=-2.2, z=1.25)),
-            aspectmode="manual",
-            aspectratio=dict(x=3.2, y=1.25, z=1)
-        ),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        margin=dict(l=0, r=0, b=0, t=0),
-        height=420,
-        showlegend=False
-    )
-    st.plotly_chart(fig_3d, use_container_width=True)
+    summary_df = container_summary_df(loading_plan)
+    detail_df = detail_plan_df(loading_plan)
 
     metric_cols = st.columns(5)
-    metric_cols[0].metric("Loaded / Total", f"{final_loaded_packages}/{total_requested_packages}")
-    metric_cols[1].metric("Primary Loaded", f"{loaded_packages}/{total_requested_packages}")
-    metric_cols[2].metric("Volume Used", f"{volume_pct:.1f}%")
-    metric_cols[3].metric("Weight Used", f"{weight_pct:.1f}%")
-    metric_cols[4].metric("Unloaded", f"{final_leftover_count}")
+    metric_cols[0].metric("Containers Used", len(loading_plan.containers))
+    metric_cols[1].metric("Loaded / Total", f"{loading_plan.loaded_count}/{loading_plan.requested_count}")
+    metric_cols[2].metric("Unloaded", loading_plan.leftover_count)
+    metric_cols[3].metric("Total Volume", f"{loading_plan.total_volume_m3:.2f} m3")
+    metric_cols[4].metric("Total Weight", f"{loading_plan.total_weight_kg:.2f} kg")
 
-    legend_cols = st.columns(max(len(loaded_rows), 1))
-    for index, row in enumerate(loaded_rows):
-        with legend_cols[index % len(legend_cols)]:
-            volume_share = (row["Volume"] / total_cargo_vol * 100) if total_cargo_vol else 0
-            st.markdown(
-                f"<span style='color:{row['Color']}; font-size:20px;'>&#9679;</span> "
-                f"<b>{row['Name']}</b><br><span style='color:#9aacc1;'>x{row['Packages']} ({volume_share:.0f}% of volume)</span>",
-                unsafe_allow_html=True
-            )
+    for message in loading_plan.suggestions:
+        st.success(message)
+    for message in loading_plan.warnings:
+        st.warning(message)
 
     st.write("---")
-    result_left, result_right = st.columns([3, 7])
-    with result_left:
-        if loaded_rows:
-            fig_summary = go.Figure(data=[go.Pie(
-                labels=[row["Name"] for row in loaded_rows],
-                values=[row["Volume"] for row in loaded_rows],
-                hole=.62,
-                marker=dict(colors=[row["Color"] for row in loaded_rows]),
-                textinfo="none"
-            )])
-            fig_summary.update_layout(margin=dict(l=0, r=0, b=0, t=0), height=190, showlegend=False)
-            st.plotly_chart(fig_summary, use_container_width=True)
-        else:
-            st.info("No cargo fitted in the selected container.")
-
-    with result_right:
-        st.markdown("| Name | Packages | Volume | Weight |")
-        st.markdown("|---|---:|---:|---:|")
-        for row in loaded_rows:
-            st.markdown(
-                f"| <span style='color:{row['Color']}; font-size:18px;'>&#9679;</span> **{row['Name']}** "
-                f"| {row['Packages']} | {row['Volume']:.2f} m3 | {row['Weight']:.2f} kg |",
-                unsafe_allow_html=True
-            )
-
-    st.write("---")
-    st.subheader("Final Load Plan")
-
-    if not unfitted_items:
-        st.success("Completed: all cargo fits in the selected container.")
-    elif best_extra_option:
-        remaining_volume = sum(item_volume(item) for item in unfitted_items) / 1e9
-        remaining_weight = sum(to_float(item.weight) for item in unfitted_items)
-        free_volume = max(total_container_vol - total_cargo_vol, 0)
-        free_weight = max(float(c_m) - total_cargo_weight, 0)
-        shortage_reasons = []
-        if remaining_volume > free_volume:
-            shortage_reasons.append("thiếu thể tích")
-        if remaining_weight > free_weight:
-            shortage_reasons.append("quá tải trọng")
-        if oversized_selected:
-            shortage_reasons.append("có kiện quá khổ so với container đã chọn")
-        reason_text = ", ".join(shortage_reasons) if shortage_reasons else "không còn vị trí phù hợp theo thuật toán xếp"
-        st.warning(
-            f"Selected container is not enough ({reason_text}). "
-            f"Suggested additional plan: {best_extra_option['count']} x {best_extra_option['name']}."
-        )
-    elif impossible_extra_items:
-        st.error("No suitable standard container option was found for at least one leftover item.")
+    st.subheader("Container Summary")
+    if summary_df.empty:
+        st.warning("No cargo could be loaded. Try a larger container or review oversized cargo.")
     else:
-        st.error("No feasible additional-container plan was found. Review dimensions, weight limits, or split oversized cargo.")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-    container_rows = []
-    detail_rows = []
-    for index, plan in enumerate(final_container_plans, start=1):
-        usage = bin_usage(plan["bin"], plan["dims"])
-        container_rows.append({
-            "Container": index,
-            "Type": plan["name"],
-            "Packages": len(plan["bin"].items),
-            "Volume Used": f"{usage['volume']:.2f} m3 ({usage['volume_pct']:.1f}%)",
-            "Weight Used": f"{usage['weight']:.2f} kg ({usage['weight_pct']:.1f}%)"
-        })
-        for row in [row for row in summarize_items(plan["bin"].items) if row["Packages"] > 0]:
-            detail_rows.append({
-                "Container": index,
-                "Container Type": plan["name"],
-                "Name": row["Name"],
-                "Packages": row["Packages"],
-                "Volume (m3)": round(row["Volume"], 2),
-                "Weight (kg)": round(row["Weight"], 2)
-            })
-    container_plan_df = pd.DataFrame(container_rows)
-    detail_plan_df = pd.DataFrame(detail_rows)
-    st.dataframe(container_plan_df, use_container_width=True, hide_index=True)
-
-    for index, plan in enumerate(final_container_plans, start=1):
-        usage = bin_usage(plan["bin"], plan["dims"])
-        with st.expander(
-            f"Container {index}: {plan['name']} - {len(plan['bin'].items)} packages, "
-            f"{usage['volume_pct']:.1f}% volume, {usage['weight_pct']:.1f}% weight",
-            expanded=index == 1
-        ):
-            plan_rows = [row for row in summarize_items(plan["bin"].items) if row["Packages"] > 0]
-            if plan_rows:
+    st.write("---")
+    st.subheader("3D Loading Models")
+    for index, container in enumerate(loading_plan.containers, start=1):
+        title = (
+            f"Container {index}: {container.spec.name} - {container.package_count} packages, "
+            f"{container.volume_pct:.1f}% volume, {container.weight_pct:.1f}% weight"
+        )
+        with st.expander(title, expanded=index == 1):
+            st.plotly_chart(build_container_figure(container), use_container_width=True)
+            rows = summarize_container(container)
+            if rows:
                 st.dataframe(
                     pd.DataFrame([
                         {
                             "Name": row["Name"],
                             "Packages": row["Packages"],
-                            "Volume (m3)": round(row["Volume"], 2),
-                            "Weight (kg)": round(row["Weight"], 2)
+                            "Volume (m3)": row["Volume (m3)"],
+                            "Weight (kg)": row["Weight (kg)"],
                         }
-                        for row in plan_rows
+                        for row in rows
                     ]),
                     use_container_width=True,
                     hide_index=True
@@ -761,40 +537,53 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             else:
                 st.info("No cargo in this container.")
 
-    if oversized_selected:
-        st.warning("Oversized against selected container:")
-        st.dataframe(pd.DataFrame(oversized_selected), use_container_width=True, hide_index=True)
-
-    if final_leftover_count > 0:
-        leftover_items = unfitted_items if not best_extra_option else []
-        leftover_rows = [row for row in summarize_items(leftover_items) if row["Packages"] > 0]
-        if leftover_rows:
-            st.warning("Leftover cargo requiring manual handling:")
-            st.dataframe(
-                pd.DataFrame([
-                    {"Name": row["Name"], "Packages": row["Packages"], "Volume (m3)": round(row["Volume"], 2), "Weight (kg)": round(row["Weight"], 2)}
-                    for row in leftover_rows
-                ]),
-                use_container_width=True,
-                hide_index=True
-            )
+    if loading_plan.leftover_items:
+        st.write("---")
+        st.subheader("Leftover Cargo")
+        leftover_rows = {}
+        for item in loading_plan.leftover_items:
+            row = leftover_rows.setdefault(item.name, {"Name": item.name, "Packages": 0, "Volume (m3)": 0.0, "Weight (kg)": 0.0})
+            row["Packages"] += 1
+            row["Volume (m3)"] += item.volume_mm3 / 1e9
+            row["Weight (kg)"] += item.weight_kg
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Name": row["Name"],
+                    "Packages": row["Packages"],
+                    "Volume (m3)": round(row["Volume (m3)"], 3),
+                    "Weight (kg)": round(row["Weight (kg)"], 2),
+                }
+                for row in leftover_rows.values()
+            ]),
+            use_container_width=True,
+            hide_index=True
+        )
+        st.info("Suggested handling: split oversized cargo, add a specialized truck/container, or update the container catalog.")
 
     st.write("")
-    action_cols = st.columns([1, 1.25, 1.25, 5])
+    action_cols = st.columns([1, 1.35, 1.2, 5])
     with action_cols[0]:
         if st.button("Back", use_container_width=True):
             st.session_state.current_tab = "CONTAINERS & TRUCKS"
             st.rerun()
     with action_cols[1]:
-        st.download_button(
-            "Download CSV",
-            data=detail_plan_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="container_load_plan.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        if not detail_df.empty:
+            st.download_button(
+                "Download CSV",
+                data=detail_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="container_load_plan.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            st.button("Download CSV", use_container_width=True, disabled=True)
     with action_cols[2]:
-        st.button("Copy request", use_container_width=True)
+        if st.button("Reset All", use_container_width=True):
+            st.session_state.calculation_requested = False
+            st.cache_data.clear()
+            st.session_state.current_tab = "PRODUCTS"
+            st.rerun()
 
 
 
