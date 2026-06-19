@@ -1,5 +1,28 @@
-﻿import hashlib
+import hashlib
 import re
+import shutil
+from pathlib import Path
+
+# GitHub web upload can accidentally flatten package folders. If the engine
+# files are in the repository root, rebuild container_optimizer/ before imports.
+APP_DIR = Path(__file__).resolve().parent
+ENGINE_DIR = APP_DIR / "container_optimizer"
+ENGINE_FILES = [
+    "__init__.py",
+    "cargo.py",
+    "containers.py",
+    "manager.py",
+    "models.py",
+    "optimization.py",
+    "packing.py",
+    "reporting.py",
+    "visualization.py",
+]
+if not ENGINE_DIR.exists() and all((APP_DIR / filename).exists() for filename in ENGINE_FILES):
+    ENGINE_DIR.mkdir()
+    for filename in ENGINE_FILES:
+        shutil.copyfile(APP_DIR / filename, ENGINE_DIR / filename)
+
 import streamlit as st
 import pandas as pd
 from container_optimizer.cargo import product_rows_to_cargo_items
