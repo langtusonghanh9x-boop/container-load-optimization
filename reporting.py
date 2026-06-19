@@ -43,10 +43,10 @@ def detail_plan_df(plan):
             rows.append({
                 "Container": index,
                 "Container Type": container.spec.name,
+                "Color": row["Color"],
                 "Name": row["Name"],
                 "Packages": row["Packages"],
                 "Volume (m3)": row["Volume (m3)"],
                 "Weight (kg)": row["Weight (kg)"],
             })
     return pd.DataFrame(rows)
-

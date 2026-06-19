@@ -1,10 +1,11 @@
 import hashlib
 import re
-import shutil
+import sys
+import types
 from pathlib import Path
 
 # GitHub web upload can accidentally flatten package folders. If the engine
-# files are in the repository root, rebuild container_optimizer/ before imports.
+# files are in the repository root, expose them as a package without writing files.
 APP_DIR = Path(__file__).resolve().parent
 ENGINE_DIR = APP_DIR / "container_optimizer"
 ENGINE_FILES = [
@@ -19,14 +20,15 @@ ENGINE_FILES = [
     "visualization.py",
 ]
 if not ENGINE_DIR.exists() and all((APP_DIR / filename).exists() for filename in ENGINE_FILES):
-    ENGINE_DIR.mkdir()
-    for filename in ENGINE_FILES:
-        shutil.copyfile(APP_DIR / filename, ENGINE_DIR / filename)
+    package = types.ModuleType("container_optimizer")
+    package.__path__ = [str(APP_DIR)]
+    sys.modules["container_optimizer"] = package
 
 import streamlit as st
 import pandas as pd
 from container_optimizer.cargo import product_rows_to_cargo_items
 from container_optimizer.containers import get_container_spec
+from container_optimizer.models import LoadingConfig
 from container_optimizer.optimization import optimize_loading
 from container_optimizer.reporting import container_summary_df, detail_plan_df, summarize_container
 from container_optimizer.visualization import build_container_figure
@@ -64,13 +66,51 @@ if 'selected_container_quantity' not in st.session_state:
     st.session_state.selected_container_quantity = 1
 if 'calculation_requested' not in st.session_state:
     st.session_state.calculation_requested = False
+if 'load_direction' not in st.session_state:
+    st.session_state.load_direction = "inside_out"
+if 'heavy_priority' not in st.session_state:
+    st.session_state.heavy_priority = "heavy_bottom"
+if 'placement_strategy' not in st.session_state:
+    st.session_state.placement_strategy = "stable_floor_first"
+if 'max_additional_containers' not in st.session_state:
+    st.session_state.max_additional_containers = 10
 
 
 @st.cache_data(show_spinner=False)
-def calculate_loading_cached(products, selected_container, custom_dims, selected_quantity):
+def calculate_loading_cached(products, selected_container, custom_dims, selected_quantity, loading_config):
     items = product_rows_to_cargo_items(products)
     spec = get_container_spec(selected_container, custom_dims)
-    return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True)
+    return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True, config=loading_config)
+
+
+def render_color_summary_table(rows):
+    if not rows:
+        st.info("No cargo in this container.")
+        return
+
+    html = [
+        "<table style='width:100%; border-collapse:collapse; font-size:14px;'>",
+        "<thead><tr style='border-bottom:1px solid #e5e7eb;'>"
+        "<th style='text-align:left; padding:8px;'>Color</th>"
+        "<th style='text-align:left; padding:8px;'>Name</th>"
+        "<th style='text-align:right; padding:8px;'>Packages</th>"
+        "<th style='text-align:right; padding:8px;'>Volume (m3)</th>"
+        "<th style='text-align:right; padding:8px;'>Weight (kg)</th>"
+        "</tr></thead><tbody>"
+    ]
+    for row in rows:
+        color = row.get("Color", "#7f8c8d")
+        html.append(
+            "<tr style='border-bottom:1px solid #f1f5f9;'>"
+            f"<td style='padding:8px;'><span style='display:inline-block;width:18px;height:18px;border-radius:4px;background:{color};border:1px solid #94a3b8;'></span></td>"
+            f"<td style='padding:8px; font-weight:600;'>{row['Name']}</td>"
+            f"<td style='padding:8px; text-align:right;'>{row['Packages']}</td>"
+            f"<td style='padding:8px; text-align:right;'>{row['Volume (m3)']:.3f}</td>"
+            f"<td style='padding:8px; text-align:right;'>{row['Weight (kg)']:.2f}</td>"
+            "</tr>"
+        )
+    html.append("</tbody></table>")
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 # --- CLICKABLE TAB NAVIGATION ---
 nav_cols = st.columns(3)
@@ -454,6 +494,55 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         step=1
     )
 
+    st.write("---")
+    st.subheader("Loading Configuration")
+    config_cols = st.columns(4)
+    with config_cols[0]:
+        direction_labels = {
+            "inside_out": "Inside to door",
+            "door_to_inside": "Door to inside"
+        }
+        direction_options = list(direction_labels.keys())
+        st.session_state.load_direction = st.selectbox(
+            "Loading direction",
+            direction_options,
+            index=direction_options.index(st.session_state.load_direction),
+            format_func=lambda value: direction_labels[value],
+            help="Inside to door means cargo is positioned from the front/deep end toward the container door."
+        )
+    with config_cols[1]:
+        priority_labels = {
+            "heavy_bottom": "Heavy bottom first",
+            "large_first": "Large first"
+        }
+        priority_options = list(priority_labels.keys())
+        st.session_state.heavy_priority = st.selectbox(
+            "Weight logic",
+            priority_options,
+            index=priority_options.index(st.session_state.heavy_priority),
+            format_func=lambda value: priority_labels[value],
+        )
+    with config_cols[2]:
+        strategy_labels = {
+            "stable_floor_first": "Length first",
+            "fill_width_before_length": "Width first"
+        }
+        strategy_options = list(strategy_labels.keys())
+        st.session_state.placement_strategy = st.selectbox(
+            "Fill strategy",
+            strategy_options,
+            index=strategy_options.index(st.session_state.placement_strategy),
+            format_func=lambda value: strategy_labels[value],
+        )
+    with config_cols[3]:
+        st.session_state.max_additional_containers = st.number_input(
+            "Max auto containers",
+            min_value=0,
+            max_value=50,
+            value=int(st.session_state.max_additional_containers),
+            step=1
+        )
+
     # Step 2 navigation controls
     st.write("---")
     col_nav1, col_nav2, _ = st.columns([1.5, 2, 8.5])
@@ -482,6 +571,12 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         st.stop()
 
     custom_dims = st.session_state.get("custom_dims", {"l": 6000, "w": 2400, "h": 2400, "m": 25000})
+    loading_config = LoadingConfig(
+        load_direction=st.session_state.load_direction,
+        heavy_priority=st.session_state.heavy_priority,
+        placement_strategy=st.session_state.placement_strategy,
+        max_additional_containers=int(st.session_state.max_additional_containers),
+    )
 
     try:
         with st.spinner("Calculating optimized loading plan..."):
@@ -489,7 +584,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 st.session_state.product_list,
                 st.session_state.selected_container,
                 custom_dims,
-                int(st.session_state.selected_container_quantity)
+                int(st.session_state.selected_container_quantity),
+                loading_config
             )
     except Exception as exc:
         st.warning("Could not complete the optimization with the current data.")
@@ -525,6 +621,10 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         st.success(message)
     for message in loading_plan.warnings:
         st.warning(message)
+    st.caption(
+        "Loading logic: heavier cargo is inserted first to occupy lower/floor positions; "
+        "the 3D view is normalized to show the selected loading direction."
+    )
 
     st.write("---")
     st.subheader("Container Summary")
@@ -543,22 +643,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         with st.expander(title, expanded=index == 1):
             st.plotly_chart(build_container_figure(container), use_container_width=True)
             rows = summarize_container(container)
-            if rows:
-                st.dataframe(
-                    pd.DataFrame([
-                        {
-                            "Name": row["Name"],
-                            "Packages": row["Packages"],
-                            "Volume (m3)": row["Volume (m3)"],
-                            "Weight (kg)": row["Weight (kg)"],
-                        }
-                        for row in rows
-                    ]),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.info("No cargo in this container.")
+            render_color_summary_table(rows)
 
     if loading_plan.leftover_items:
         st.write("---")

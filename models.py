@@ -90,3 +90,11 @@ class LoadingPlan:
     def total_weight_kg(self) -> float:
         return sum(container.cargo_weight_kg for container in self.containers)
 
+
+@dataclass(frozen=True)
+class LoadingConfig:
+    load_direction: str = "inside_out"
+    heavy_priority: str = "heavy_bottom"
+    placement_strategy: str = "stable_floor_first"
+    max_additional_containers: int = 10
+    minimum_support_ratio: float = 0.65
