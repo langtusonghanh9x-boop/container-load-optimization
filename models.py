@@ -1,0 +1,92 @@
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class CargoItem:
+    id: str
+    name: str
+    length_mm: float
+    width_mm: float
+    height_mm: float
+    weight_kg: float
+    color: str = "#7f8c8d"
+    cargo_type: str = "General Cargo"
+
+    @property
+    def volume_mm3(self) -> float:
+        return self.length_mm * self.width_mm * self.height_mm
+
+
+@dataclass(frozen=True)
+class ContainerSpec:
+    name: str
+    length_mm: float
+    width_mm: float
+    height_mm: float
+    max_weight_kg: float
+
+    @property
+    def volume_m3(self) -> float:
+        return (self.length_mm * self.width_mm * self.height_mm) / 1e9
+
+
+@dataclass
+class PackedItem:
+    cargo: CargoItem
+    position: Tuple[float, float, float]
+    size: Tuple[float, float, float]
+
+
+@dataclass
+class PackedContainer:
+    spec: ContainerSpec
+    items: List[PackedItem] = field(default_factory=list)
+    role: str = "Selected"
+
+    @property
+    def package_count(self) -> int:
+        return len(self.items)
+
+    @property
+    def cargo_volume_m3(self) -> float:
+        return sum(item.size[0] * item.size[1] * item.size[2] for item in self.items) / 1e9
+
+    @property
+    def cargo_weight_kg(self) -> float:
+        return sum(item.cargo.weight_kg for item in self.items)
+
+    @property
+    def volume_pct(self) -> float:
+        return (self.cargo_volume_m3 / self.spec.volume_m3 * 100) if self.spec.volume_m3 else 0
+
+    @property
+    def weight_pct(self) -> float:
+        return (self.cargo_weight_kg / self.spec.max_weight_kg * 100) if self.spec.max_weight_kg else 0
+
+
+@dataclass
+class LoadingPlan:
+    containers: List[PackedContainer]
+    requested_count: int
+    leftover_items: List[CargoItem]
+    warnings: List[str] = field(default_factory=list)
+    suggestions: List[str] = field(default_factory=list)
+    diagnostics: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def loaded_count(self) -> int:
+        return sum(container.package_count for container in self.containers)
+
+    @property
+    def leftover_count(self) -> int:
+        return len(self.leftover_items)
+
+    @property
+    def total_volume_m3(self) -> float:
+        return sum(container.cargo_volume_m3 for container in self.containers)
+
+    @property
+    def total_weight_kg(self) -> float:
+        return sum(container.cargo_weight_kg for container in self.containers)
+
