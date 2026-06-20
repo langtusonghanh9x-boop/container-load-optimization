@@ -674,17 +674,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 st.session_state.variant_idx = 0
 
             # Navigation controls
-            col_prev, col_name, col_next = st.columns([1, 2, 1])
-            with col_prev:
-                if st.button("← Prev", key="prev_variant") and st.session_state.variant_idx > 0:
-                    st.session_state.variant_idx -= 1
-            with col_name:
-                current_variant = selected_strategies[st.session_state.variant_idx]
-                st.markdown(f"**Variant:** {strategy_labels.get(current_variant, current_variant)}")
-            with col_next:
-                if st.button("Next →", key="next_variant") and st.session_state.variant_idx < len(selected_strategies) - 1:
-                    st.session_state.variant_idx += 1
-
+# Variant navigation UI moved to after 3D models section
             selected_variant = selected_strategies[st.session_state.variant_idx]
             loading_plan = st.session_state.loading_plans.get(selected_variant)
     except Exception as exc:
@@ -744,6 +734,24 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             st.plotly_chart(build_container_figure(container), use_container_width=True)
             rows = summarize_container(container)
             render_color_summary_table(rows)
+
+            # Variant navigation UI (buttons)
+            if "variant_idx" not in st.session_state:
+                st.session_state.variant_idx = 0
+            col_prev, col_name, col_next = st.columns([1, 2, 1])
+            with col_prev:
+                if st.button("← Prev", key="prev_variant") and st.session_state.variant_idx > 0:
+                    st.session_state.variant_idx -= 1
+            with col_name:
+                current_variant = selected_strategies[st.session_state.variant_idx]
+                st.markdown(f"**Variant:** {strategy_labels.get(current_variant, current_variant)}")
+            with col_next:
+                if st.button("Next →", key="next_variant") and st.session_state.variant_idx < len(selected_strategies) - 1:
+                    st.session_state.variant_idx += 1
+
+            # Update selected variant and loading plan after navigation
+            selected_variant = selected_strategies[st.session_state.variant_idx]
+            loading_plan = st.session_state.loading_plans.get(selected_variant)
 
     if loading_plan.leftover_items:
         st.write("---")
