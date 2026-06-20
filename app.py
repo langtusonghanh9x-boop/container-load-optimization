@@ -560,18 +560,29 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             index=priority_options.index(st.session_state.heavy_priority),
             format_func=lambda value: priority_labels[value],
         )
-    with config_cols[2]:
-        strategy_labels = {
-            "stable_floor_first": "Length first",
-            "fill_width_before_length": "Width first"
-        }
-        strategy_options = list(strategy_labels.keys())
-        st.session_state.placement_strategy = st.selectbox(
-            "Fill strategy",
-            strategy_options,
-            index=strategy_options.index(st.session_state.placement_strategy),
-            format_func=lambda value: strategy_labels[value],
-        )
+
+        # Placement strategy selector
+        with config_cols[2]:
+            strategy_labels = {
+                "stable_floor_first": "Length first",
+                "fill_width_before_length": "Width first",
+            }
+            strategy_options = list(strategy_labels.keys())
+            st.session_state.placement_strategy = st.selectbox(
+                "Fill strategy",
+                strategy_options,
+                index=strategy_options.index(st.session_state.placement_strategy),
+                format_func=lambda value: strategy_labels[value],
+            )
+            # Multi‑strategy selector (compute alternative packing variants)
+            default_strats = [st.session_state.placement_strategy] if st.session_state.placement_strategy in strategy_options else []
+            st.session_state.selected_strategies = st.multiselect(
+                "Compute alternative packing variants",
+                options=strategy_options,
+                default=default_strats,
+                help="Select one or more placement strategies to evaluate. The app will run the optimizer for each."
+            )
+    
     with config_cols[3]:
         st.session_state.max_additional_containers = st.number_input(
             "Max auto containers",
@@ -580,6 +591,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             value=int(st.session_state.max_additional_containers),
             step=1
         )
+
     with config_cols[4]:
         st.session_state.contact_compaction = st.checkbox(
             "Contact compaction",
@@ -624,24 +636,57 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         st.stop()
 
     custom_dims = st.session_state.get("custom_dims", {"l": 6000, "w": 2400, "h": 2400, "m": 25000})
-    loading_config = make_loading_config(
-        load_direction=st.session_state.load_direction,
-        heavy_priority=st.session_state.heavy_priority,
-        placement_strategy=st.session_state.placement_strategy,
-        max_additional_containers=int(st.session_state.max_additional_containers),
-        minimum_support_ratio=float(st.session_state.minimum_support_ratio),
-        contact_compaction=bool(st.session_state.contact_compaction),
-    )
-
+# Deprecated: loading_config is now generated per selected strategy below
     try:
         with st.spinner("Calculating optimized loading plan..."):
-            loading_plan = calculate_loading_cached(
-                st.session_state.product_list,
-                st.session_state.selected_container,
-                custom_dims,
-                int(st.session_state.selected_container_quantity),
-                loading_config
-            )
+            # Determine which strategies to compute
+            strategy_labels = {
+                "stable_floor_first": "Length first",
+                "fill_width_before_length": "Width first"
+            }
+            selected_strategies = st.session_state.get('selected_strategies', [st.session_state.placement_strategy])
+            # Initialize or refresh loading plans if the strategy list changed
+            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('strategies') != selected_strategies):
+                st.session_state.loading_plans = {'strategies': selected_strategies}
+                for strat in selected_strategies:
+                    config = make_loading_config(
+                        load_direction=st.session_state.load_direction,
+                        heavy_priority=st.session_state.heavy_priority,
+                        placement_strategy=strat,
+                        max_additional_containers=int(st.session_state.max_additional_containers),
+                        minimum_support_ratio=float(st.session_state.minimum_support_ratio),
+                        contact_compaction=bool(st.session_state.contact_compaction),
+                    )
+                    try:
+                        plan = calculate_loading_cached(
+                            st.session_state.product_list,
+                            st.session_state.selected_container,
+                            custom_dims,
+                            int(st.session_state.selected_container_quantity),
+                            config
+                        )
+                    except Exception as exc:
+                        st.warning(f"Failed to compute loading for strategy '{strat}': {exc}")
+                        plan = None
+                    st.session_state.loading_plans[strat] = plan
+            # Initialize variant navigation index
+            if "variant_idx" not in st.session_state or st.session_state.variant_idx >= len(selected_strategies):
+                st.session_state.variant_idx = 0
+
+            # Navigation controls
+            col_prev, col_name, col_next = st.columns([1, 2, 1])
+            with col_prev:
+                if st.button("← Prev", key="prev_variant") and st.session_state.variant_idx > 0:
+                    st.session_state.variant_idx -= 1
+            with col_name:
+                current_variant = selected_strategies[st.session_state.variant_idx]
+                st.markdown(f"**Variant:** {strategy_labels.get(current_variant, current_variant)}")
+            with col_next:
+                if st.button("Next →", key="next_variant") and st.session_state.variant_idx < len(selected_strategies) - 1:
+                    st.session_state.variant_idx += 1
+
+            selected_variant = selected_strategies[st.session_state.variant_idx]
+            loading_plan = st.session_state.loading_plans.get(selected_variant)
     except Exception as exc:
         st.warning("Could not complete the optimization with the current data.")
         st.info("Check cargo dimensions, quantities, and weights. You can also reduce the lot size or try a larger container.")
