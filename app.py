@@ -587,8 +587,13 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
                 "m": 25000
             })
             st.session_state.custom_container_version += 1
+            # Persist the updated list
             with open('custom_containers.json', 'w') as f:
                 json.dump(st.session_state.custom_containers, f, indent=2)
+            # Automatically select the new container and trigger calculation
+            st.session_state.selected_container = f"Custom {new_index}"
+            st.session_state.calculation_requested = True
+            st.session_state.current_tab = "STUFFING RESULT"
             st.rerun()
 
     st.session_state.selected_container_quantity = st.number_input(
