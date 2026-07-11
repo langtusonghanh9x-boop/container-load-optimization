@@ -422,12 +422,26 @@ if st.session_state.current_tab == "PRODUCTS":
                     st.rerun()
 
             except Exception as e:
-                pass
-        
+                st.warning(f"Could not import this file: {e}")
+
+    if st.session_state.get("import_success_message"):
+        st.success(st.session_state.import_success_message)
+    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
+    with col_h1: st.markdown("**Product Name**")
+    with col_h_type: st.markdown("**Cargo Type**")
+    with col_h2: st.markdown("**Length**")
+    with col_h3: st.markdown("**Width**")
+    with col_h4: st.markdown("**Height**")
+    with col_h5: st.markdown("**Weight (kg)**")
+    with col_h6: st.markdown("**Quantity**")
+    with col_h7: st.markdown("**Color**")
+    with col_h8: st.markdown("**Del**")
+
+    # Update product rows while keeping Streamlit state stable
     temp_list = []
     to_delete = None
+    
     product_key_version = st.session_state.product_list_version
-
     for i, prod in enumerate(st.session_state.product_list):
         cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
@@ -446,6 +460,9 @@ if st.session_state.current_tab == "PRODUCTS":
             to_delete = i
             
         temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
+
+    if to_delete is not None:
+        temp_list.pop(to_delete)
         clear_product_input_state()
         st.session_state.product_list = temp_list
         st.session_state.product_list_version += 1
@@ -476,45 +493,29 @@ if st.session_state.current_tab == "PRODUCTS":
             st.session_state.calculation_requested = False
             clear_product_input_state()
             st.rerun()
-with add_cols[0]:
-    if st.button("Add Product"):
-        st.session_state.product_list.append({"name": "New Item", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 1, "color": "#e74c3c", "cargo_type": "General Cargo"})
-        st.session_state.product_list_version += 1
-        st.rerun()
-with add_cols[1]:
-    if st.button("Add Lumber Bundle"):
-        st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
-        st.session_state.product_list_version += 1
-        st.rerun()
-with add_cols[2]:
-    if st.button("Reset All"):
-        st.session_state.product_list = [
-            {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
-            {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-            {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
-        ]
-        st.session_state.product_list_version += 1
-        st.session_state.calculation_requested = False
-        clear_product_input_state()
-        st.rerun()
-st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
+    st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
 
-# Move from step 1 to step 2
-st.write("---")
-if st.button("Next", type="primary"):
-    st.session_state.current_tab = "CONTAINERS & TRUCKS"
-    st.rerun()
+    # Move from step 1 to step 2
+    st.write("---")
+    if st.button("Next", type="primary"):
+        st.session_state.current_tab = "CONTAINERS & TRUCKS"
+        st.rerun()
 
 
 # ==========================================
-# NOTE: Custom container addition logic placeholder.
-# The following code was causing an IndentationError and referenced undefined variables.
-# Implement proper UI and variable handling before enabling this feature.
-# st.session_state.custom_containers.append({"name": new_name.strip(), "l": new_l, "w": new_w, "h": new_h, "m": new_m})
-# save_custom_containers(st.session_state.custom_containers)
-# st.rerun()
-
-    # Custom dimension inputs – shown only when "Custom" is selected (ad‑hoc entry)
+# SCREEN 2: CONTAINERS & TRUCKS
+# ==========================================
+elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
+    st.subheader("Step 2: Select Container / Truck")
+    
+    container_options = list(CONTAINER_DICT.keys()) + ["Custom"]
+    selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
+    st.session_state.selected_container = st.selectbox(
+        "Select the target container type:",
+        container_options,
+        index=selected_container_index
+    )
+    
     if st.session_state.selected_container == "Custom":
         if 'custom_dims' not in st.session_state:
             st.session_state.custom_dims = {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
@@ -523,7 +524,6 @@ if st.button("Next", type="primary"):
         st.session_state.custom_dims["h"] = st.number_input("Custom height (mm)", value=st.session_state.custom_dims["h"])
         st.session_state.custom_dims["m"] = st.number_input("Custom max payload (kg)", value=st.session_state.custom_dims["m"])
 
-    # Keep the original quantity input unchanged
     st.session_state.selected_container_quantity = st.number_input(
         "Number of selected containers:",
         min_value=1,
