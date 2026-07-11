@@ -493,62 +493,6 @@ if st.session_state.current_tab == "PRODUCTS":
             st.session_state.calculation_requested = False
             clear_product_input_state()
             st.rerun()
-
-            def is_blank(value):
-                return pd.isna(value) or str(value).strip() == ""
-
-            def parse_number(value, default=1):
-                if pd.isna(value):
-                    return default
-                if isinstance(value, (int, float)):
-                    return int(value) if value > 0 else default
-
-                text = str(value).strip().replace(",", "")
-                match = re.search(r"-?\d+(?:\.\d+)?", text)
-                if not match:
-                    return default
-
-                number = float(match.group(0))
-                return int(number) if number > 0 else default
-
-            data_columns = [col_desc, col_len, col_wid, col_hei, col_wt, col_qty]
-
-            for idx, row in df.iterrows():
-                if all(is_blank(row[column]) for column in data_columns):
-                    continue
-
-                raw_name = row[col_desc]
-                product_name = "" if is_blank(raw_name) else str(raw_name).strip()
-                if not product_name:
-                    product_name = f"Imported row {len(imported_products) + 1}"
-
-                imported_products.append({
-                    "name": product_name,
-                    "l": parse_number(row[col_len]),
-                    "w": parse_number(row[col_wid]),
-                    "h": parse_number(row[col_hei]),
-                    "wt": parse_number(row[col_wt]),
-                    "qty": parse_number(row[col_qty]),
-                    "color": colors[len(imported_products) % len(colors)],
-                    "cargo_type": "General Cargo"
-                })
-            if not imported_products:
-                st.warning("No valid product rows were found in the uploaded file.")
-            else:
-                clear_product_input_state()
-                st.session_state.product_list = imported_products
-                st.session_state.product_list_version += 1
-                st.session_state.last_import_file_hash = import_key
-                st.session_state.import_success_message = "Created"
-                st.rerun()
-
-        except Exception as e:
-            st.warning(f"Could not import this file: {e}")
-
-if st.session_state.get("import_success_message"):
-    st.success(st.session_state.import_success_message)
-col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
-with col_h1: st.markdown("**Product Name**")
 with col_h_type: st.markdown("**Cargo Type**")
 with col_h2: st.markdown("**Length**")
 with col_h3: st.markdown("**Width**")
