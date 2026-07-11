@@ -422,25 +422,12 @@ if st.session_state.current_tab == "PRODUCTS":
                     st.rerun()
 
             except Exception as e:
-                st.warning(f"Could not import this file: {e}")
-
-    if st.session_state.get("import_success_message"):
-        st.success(st.session_state.import_success_message)
-    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
-    with col_h1: st.markdown("**Product Name**")
-    with col_h_type: st.markdown("**Cargo Type**")
-    with col_h2: st.markdown("**Length**")
-    with col_h3: st.markdown("**Width**")
-    with col_h4: st.markdown("**Height**")
-    with col_h5: st.markdown("**Weight (kg)**")
-    with col_h6: st.markdown("**Quantity**")
-    with col_h7: st.markdown("**Color**")
-    with col_h8: st.markdown("**Del**")
-
+                pass
+        
     temp_list = []
     to_delete = None
-    
     product_key_version = st.session_state.product_list_version
+
     for i, prod in enumerate(st.session_state.product_list):
         cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
@@ -459,9 +446,6 @@ if st.session_state.current_tab == "PRODUCTS":
             to_delete = i
             
         temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
-
-    if to_delete is not None:
-        temp_list.pop(to_delete)
         clear_product_input_state()
         st.session_state.product_list = temp_list
         st.session_state.product_list_version += 1
@@ -492,50 +476,6 @@ if st.session_state.current_tab == "PRODUCTS":
             st.session_state.calculation_requested = False
             clear_product_input_state()
             st.rerun()
-with col_h_type: st.markdown("**Cargo Type**")
-with col_h2: st.markdown("**Length**")
-with col_h3: st.markdown("**Width**")
-with col_h4: st.markdown("**Height**")
-with col_h5: st.markdown("**Weight (kg)**")
-with col_h6: st.markdown("**Quantity**")
-with col_h7: st.markdown("**Color**")
-with col_h8: st.markdown("**Del**")
-
-# Update product rows while keeping Streamlit state stable
-temp_list = []
-to_delete = None
-
-product_key_version = st.session_state.product_list_version
-for i, prod in enumerate(st.session_state.product_list):
-    cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
-    name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
-    cargo_type_options = ["General Cargo", "Lumber Bundle"]
-    current_cargo_type = prod.get("cargo_type", "General Cargo")
-    cargo_type = cols[1].selectbox("", cargo_type_options, index=cargo_type_options.index(current_cargo_type) if current_cargo_type in cargo_type_options else 0, key=f"type_{product_key_version}_{i}", label_visibility="collapsed")
-    dim_step = 1 if cargo_type == "Lumber Bundle" else 10
-    l = cols[2].number_input("", value=prod["l"], step=dim_step, key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
-    w = cols[3].number_input("", value=prod["w"], step=dim_step, key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
-    h = cols[4].number_input("", value=prod["h"], step=dim_step, key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
-    wt = cols[5].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
-    qty = cols[6].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
-    color = cols[7].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
-    
-    if cols[8].button("Delete", key=f"del_{product_key_version}_{i}"):
-        to_delete = i
-        
-    temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
-
-if to_delete is not None:
-    temp_list.pop(to_delete)
-    clear_product_input_state()
-    st.session_state.product_list = temp_list
-    st.session_state.product_list_version += 1
-    st.rerun()
-else:
-    st.session_state.product_list = temp_list
-
-st.write("")
-add_cols = st.columns([1.2, 1.5, 1.5, 6])
 with add_cols[0]:
     if st.button("Add Product"):
         st.session_state.product_list.append({"name": "New Item", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 1, "color": "#e74c3c", "cargo_type": "General Cargo"})
