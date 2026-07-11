@@ -493,19 +493,143 @@ if st.session_state.current_tab == "PRODUCTS":
             st.session_state.calculation_requested = False
             clear_product_input_state()
             st.rerun()
-    st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
 
-    # Move from step 1 to step 2
-    st.write("---")
-    if st.button("Next", type="primary"):
-        st.session_state.current_tab = "CONTAINERS & TRUCKS"
+            def is_blank(value):
+                return pd.isna(value) or str(value).strip() == ""
+
+            def parse_number(value, default=1):
+                if pd.isna(value):
+                    return default
+                if isinstance(value, (int, float)):
+                    return int(value) if value > 0 else default
+
+                text = str(value).strip().replace(",", "")
+                match = re.search(r"-?\d+(?:\.\d+)?", text)
+                if not match:
+                    return default
+
+                number = float(match.group(0))
+                return int(number) if number > 0 else default
+
+            data_columns = [col_desc, col_len, col_wid, col_hei, col_wt, col_qty]
+
+            for idx, row in df.iterrows():
+                if all(is_blank(row[column]) for column in data_columns):
+                    continue
+
+                raw_name = row[col_desc]
+                product_name = "" if is_blank(raw_name) else str(raw_name).strip()
+                if not product_name:
+                    product_name = f"Imported row {len(imported_products) + 1}"
+
+                imported_products.append({
+                    "name": product_name,
+                    "l": parse_number(row[col_len]),
+                    "w": parse_number(row[col_wid]),
+                    "h": parse_number(row[col_hei]),
+                    "wt": parse_number(row[col_wt]),
+                    "qty": parse_number(row[col_qty]),
+                    "color": colors[len(imported_products) % len(colors)],
+                    "cargo_type": "General Cargo"
+                })
+            if not imported_products:
+                st.warning("No valid product rows were found in the uploaded file.")
+            else:
+                clear_product_input_state()
+                st.session_state.product_list = imported_products
+                st.session_state.product_list_version += 1
+                st.session_state.last_import_file_hash = import_key
+                st.session_state.import_success_message = "Created"
+                st.rerun()
+
+        except Exception as e:
+            st.warning(f"Could not import this file: {e}")
+
+if st.session_state.get("import_success_message"):
+    st.success(st.session_state.import_success_message)
+col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
+with col_h1: st.markdown("**Product Name**")
+with col_h_type: st.markdown("**Cargo Type**")
+with col_h2: st.markdown("**Length**")
+with col_h3: st.markdown("**Width**")
+with col_h4: st.markdown("**Height**")
+with col_h5: st.markdown("**Weight (kg)**")
+with col_h6: st.markdown("**Quantity**")
+with col_h7: st.markdown("**Color**")
+with col_h8: st.markdown("**Del**")
+
+# Update product rows while keeping Streamlit state stable
+temp_list = []
+to_delete = None
+
+product_key_version = st.session_state.product_list_version
+for i, prod in enumerate(st.session_state.product_list):
+    cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
+    name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
+    cargo_type_options = ["General Cargo", "Lumber Bundle"]
+    current_cargo_type = prod.get("cargo_type", "General Cargo")
+    cargo_type = cols[1].selectbox("", cargo_type_options, index=cargo_type_options.index(current_cargo_type) if current_cargo_type in cargo_type_options else 0, key=f"type_{product_key_version}_{i}", label_visibility="collapsed")
+    dim_step = 1 if cargo_type == "Lumber Bundle" else 10
+    l = cols[2].number_input("", value=prod["l"], step=dim_step, key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
+    w = cols[3].number_input("", value=prod["w"], step=dim_step, key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
+    h = cols[4].number_input("", value=prod["h"], step=dim_step, key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
+    wt = cols[5].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
+    qty = cols[6].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
+    color = cols[7].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
+    
+    if cols[8].button("Delete", key=f"del_{product_key_version}_{i}"):
+        to_delete = i
+        
+    temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
+
+if to_delete is not None:
+    temp_list.pop(to_delete)
+    clear_product_input_state()
+    st.session_state.product_list = temp_list
+    st.session_state.product_list_version += 1
+    st.rerun()
+else:
+    st.session_state.product_list = temp_list
+
+st.write("")
+add_cols = st.columns([1.2, 1.5, 1.5, 6])
+with add_cols[0]:
+    if st.button("Add Product"):
+        st.session_state.product_list.append({"name": "New Item", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 1, "color": "#e74c3c", "cargo_type": "General Cargo"})
+        st.session_state.product_list_version += 1
         st.rerun()
+with add_cols[1]:
+    if st.button("Add Lumber Bundle"):
+        st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
+        st.session_state.product_list_version += 1
+        st.rerun()
+with add_cols[2]:
+    if st.button("Reset All"):
+        st.session_state.product_list = [
+            {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+            {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+            {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
+        ]
+        st.session_state.product_list_version += 1
+        st.session_state.calculation_requested = False
+        clear_product_input_state()
+        st.rerun()
+st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
+
+# Move from step 1 to step 2
+st.write("---")
+if st.button("Next", type="primary"):
+    st.session_state.current_tab = "CONTAINERS & TRUCKS"
+    st.rerun()
 
 
 # ==========================================
-                    st.session_state.custom_containers.append({"name": new_name.strip(), "l": new_l, "w": new_w, "h": new_h, "m": new_m})
-                    save_custom_containers(st.session_state.custom_containers)
-                    st.rerun()
+# NOTE: Custom container addition logic placeholder.
+# The following code was causing an IndentationError and referenced undefined variables.
+# Implement proper UI and variable handling before enabling this feature.
+# st.session_state.custom_containers.append({"name": new_name.strip(), "l": new_l, "w": new_w, "h": new_h, "m": new_m})
+# save_custom_containers(st.session_state.custom_containers)
+# st.rerun()
 
     # Custom dimension inputs – shown only when "Custom" is selected (ad‑hoc entry)
     if st.session_state.selected_container == "Custom":
