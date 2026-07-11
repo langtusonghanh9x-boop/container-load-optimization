@@ -529,7 +529,7 @@ if st.session_state.current_tab == "PRODUCTS":
 elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     st.subheader("Step 2: Select Container / Truck")
     
-    container_options = list(CONTAINER_DICT.keys()) + [c.get('name', f'Custom {i+1}') for i, c in enumerate(st.session_state.custom_containers)] + ["Custom"]
+    container_options = list(CONTAINER_DICT.keys()) + [c.get("name", f"Custom {i+1}") for i, c in enumerate(st.session_state.custom_containers)]
     selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
     st.session_state.selected_container = st.selectbox(
         "Select the target container type:",
@@ -537,72 +537,77 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         index=selected_container_index
     )
     
-    # The custom container editing UI is now accessible via the "Custom" option.
-    if st.session_state.selected_container == "Custom":
-        # Ensure the custom containers list exists
-        if "custom_containers" not in st.session_state:
-            st.session_state.custom_containers = []
-        custom_version = st.session_state.custom_container_version
-        temp_list = []
-        to_delete = None
-        for i, cont in enumerate(st.session_state.custom_containers):
-            cols = st.columns([1.5, 1.2, 1.2, 1.2, 1.2, 0.5])
-            name = cols[0].text_input("Name", value=cont.get("name", f"Custom {i+1}"), key=f"c_name_{custom_version}_{i}")
-            l = cols[1].number_input("Length (mm)", value=cont.get("l", 6000), step=10, key=f"c_l_{custom_version}_{i}")
-            w = cols[2].number_input("Width (mm)", value=cont.get("w", 2400), step=10, key=f"c_w_{custom_version}_{i}")
-            h = cols[3].number_input("Height (mm)", value=cont.get("h", 2400), step=10, key=f"c_h_{custom_version}_{i}")
-            m = cols[4].number_input("Max payload (kg)", value=cont.get("m", 25000), step=10, key=f"c_m_{custom_version}_{i}")
-            if cols[5].button("Delete", key=f"c_del_{custom_version}_{i}"):
-                to_delete = i
-            temp_list.append({"name": name, "l": l, "w": w, "h": h, "m": m})
-        # Handle deletions
-        if to_delete is not None:
-            st.session_state.custom_containers.pop(to_delete)
-            st.session_state.custom_container_version += 1
-            with open('custom_containers.json', 'w') as f:
-                json.dump(st.session_state.custom_containers, f, indent=2)
-            if not st.session_state.custom_containers:
-                st.session_state.custom_dims = {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
-            st.rerun()
-        else:
-            if temp_list != st.session_state.custom_containers:
-                st.session_state.custom_containers = temp_list
-                st.session_state.custom_container_version += 1
+    # If a custom container is selected, show its editable fields
+    if st.session_state.selected_container not in CONTAINER_DICT:
+        # Find the custom container entry
+        custom_idx = next((i for i, c in enumerate(st.session_state.custom_containers) 
+                         if c.get("name") == st.session_state.selected_container), None)
+        if custom_idx is not None:
+            cont = st.session_state.custom_containers[custom_idx]
+            edit_cols = st.columns([1.5, 1.2, 1.2, 1.2, 1.2, 0.5])
+            edit_name = edit_cols[0].text_input(
+                "Name", value=cont.get("name", f"Custom {custom_idx+1}"),
+                key=f"edit_name_{custom_idx}"
+            )
+            edit_l = edit_cols[1].number_input(
+                "Length (mm)", value=cont.get("l", 6000), step=10,
+                key=f"edit_l_{custom_idx}"
+            )
+            edit_w = edit_cols[2].number_input(
+                "Width (mm)", value=cont.get("w", 2400), step=10,
+                key=f"edit_w_{custom_idx}"
+            )
+            edit_h = edit_cols[3].number_input(
+                "Height (mm)", value=cont.get("h", 2400), step=10,
+                key=f"edit_h_{custom_idx}"
+            )
+            edit_m = edit_cols[4].number_input(
+                "Max payload (kg)", value=cont.get("m", 25000), step=10,
+                key=f"edit_m_{custom_idx}"
+            )
+            # Delete button
+            if edit_cols[5].button("Delete", key=f"del_{custom_idx}"):
+                st.session_state.custom_containers.pop(custom_idx)
                 with open('custom_containers.json', 'w') as f:
                     json.dump(st.session_state.custom_containers, f, indent=2)
-        # Save button to persist any changes made above
-        if st.button("Save Custom Containers"):
-            with open('custom_containers.json', 'w') as f:
-                json.dump(st.session_state.custom_containers, f, indent=2)
-            st.session_state.custom_container_version += 1
-            st.success("Custom containers saved.")
-        # Button to add a new custom container
-        if st.button("Add Custom Container"):
-            new_index = len(st.session_state.custom_containers) + 1
-            st.session_state.custom_containers.append({
-                "name": f"Custom {new_index}",
-                "l": 6000,
-                "w": 2400,
-                "h": 2400,
-                "m": 25000
-            })
-            st.session_state.custom_container_version += 1
-            # Persist the updated list
-            with open('custom_containers.json', 'w') as f:
-                json.dump(st.session_state.custom_containers, f, indent=2)
-            # Automatically select the new container and trigger calculation
-            st.session_state.selected_container = f"Custom {new_index}"
-            st.session_state.calculation_requested = True
-            st.session_state.current_tab = "STUFFING RESULT"
-            st.rerun()
+                st.success("Custom container deleted.")
+                # Reset selection to first option
+                if st.session_state.custom_containers:
+                    st.session_state.selected_container = st.session_state.custom_containers[0]["name"]
+                else:
+                    st.session_state.selected_container = list(CONTAINER_DICT.keys())[0]
+                st.rerun()
+            # Save button
+            if st.button("Save Custom Container"):
+                st.session_state.custom_containers[custom_idx] = {
+                    "name": edit_name,
+                    "l": edit_l,
+                    "w": edit_w,
+                    "h": edit_h,
+                    "m": edit_m
+                }
+                with open('custom_containers.json', 'w') as f:
+                    json.dump(st.session_state.custom_containers, f, indent=2)
+                st.success("Custom container saved.")
+                st.rerun()
+    # Button to add a new custom container
+    if st.button("Add Custom Container"):
+        new_index = len(st.session_state.custom_containers) + 1
+        st.session_state.custom_containers.append({
+            "name": f"Custom {new_index}",
+            "l": 6000,
+            "w": 2400,
+            "h": 2400,
+            "m": 25000
+        })
+        # Persist the updated list
+        with open('custom_containers.json', 'w') as f:
+            json.dump(st.session_state.custom_containers, f, indent=2)
+        # Automatically select the new container
+        st.session_state.selected_container = f"Custom {new_index}"
+        st.rerun()
 
-    st.session_state.selected_container_quantity = st.number_input(
-        "Number of selected containers:",
-        min_value=1,
-        max_value=20,
-        value=int(st.session_state.selected_container_quantity),
-        step=1
-    )
+
 
     # Determine custom dimensions based on selected container
     if st.session_state.selected_container in CONTAINER_DICT:
