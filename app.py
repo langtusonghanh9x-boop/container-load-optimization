@@ -27,6 +27,7 @@ if not ENGINE_DIR.exists() and all((APP_DIR / filename).exists() for filename in
 
 import streamlit as st
 import pandas as pd
+import json
 from container_optimizer.cargo import product_rows_to_cargo_items
 from container_optimizer.containers import get_container_spec
 import container_optimizer.models as optimizer_models
@@ -92,6 +93,17 @@ if 'max_additional_containers' not in st.session_state:
     st.session_state.max_additional_containers = 10
 if 'contact_compaction' not in st.session_state:
     st.session_state.contact_compaction = True
+
+# Load persisted custom containers configuration
+if 'custom_containers' not in st.session_state:
+    try:
+        with open('custom_containers.json', 'r') as f:
+            st.session_state.custom_containers = json.load(f)
+    except FileNotFoundError:
+        st.session_state.custom_containers = []
+# Version counter for custom container UI keys
+if 'custom_container_version' not in st.session_state:
+    st.session_state.custom_container_version = 0
 if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
@@ -503,6 +515,15 @@ if st.session_state.current_tab == "PRODUCTS":
 
 
 # ==========================================
+
+    # Move from step 1 to step 2
+    st.write("---")
+    if st.button("Next", type="primary"):
+        st.session_state.current_tab = "CONTAINERS & TRUCKS"
+        st.rerun()
+
+
+# ==========================================
 # SCREEN 2: CONTAINERS & TRUCKS
 # ==========================================
 elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
@@ -517,12 +538,53 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     )
     
     if st.session_state.selected_container == "Custom":
-        if 'custom_dims' not in st.session_state:
+        # Ensure the custom containers list exists
+        if 'custom_containers' not in st.session_state:
+            st.session_state.custom_containers = []
+        custom_version = st.session_state.custom_container_version
+        temp_list = []
+        to_delete = None
+        for i, cont in enumerate(st.session_state.custom_containers):
+            cols = st.columns([1.2, 1.2, 1.2, 1.2, 0.5])
+            l = cols[0].number_input("Length (mm)", value=cont.get('l', 6000), step=10, key=f"c_l_{custom_version}_{i}")
+            w = cols[1].number_input("Width (mm)", value=cont.get('w', 2400), step=10, key=f"c_w_{custom_version}_{i}")
+            h = cols[2].number_input("Height (mm)", value=cont.get('h', 2400), step=10, key=f"c_h_{custom_version}_{i}")
+            m = cols[3].number_input("Max payload (kg)", value=cont.get('m', 25000), step=10, key=f"c_m_{custom_version}_{i}")
+            if cols[4].button("Delete", key=f"c_del_{custom_version}_{i}"):
+                to_delete = i
+            temp_list.append({"l": l, "w": w, "h": h, "m": m})
+        # Handle deletions
+        if to_delete is not None:
+            st.session_state.custom_containers.pop(to_delete)
+            st.session_state.custom_container_version += 1
+            with open('custom_containers.json', 'w') as f:
+                json.dump(st.session_state.custom_containers, f, indent=2)
+            st.rerun()
+        else:
+            # Update list if changed
+            if temp_list != st.session_state.custom_containers:
+                st.session_state.custom_containers = temp_list
+                st.session_state.custom_container_version += 1
+                with open('custom_containers.json', 'w') as f:
+                    json.dump(st.session_state.custom_containers, f, indent=2)
+        # Select which custom container to use for optimization
+        if st.session_state.custom_containers:
+            selected_idx = st.selectbox(
+                "Select custom container configuration",
+                options=list(range(len(st.session_state.custom_containers))),
+                index=0,
+                key="custom_select"
+            )
+            st.session_state.custom_dims = st.session_state.custom_containers[selected_idx]
+        else:
             st.session_state.custom_dims = {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
-        st.session_state.custom_dims["l"] = st.number_input("Custom length (mm)", value=st.session_state.custom_dims["l"])
-        st.session_state.custom_dims["w"] = st.number_input("Custom width (mm)", value=st.session_state.custom_dims["w"])
-        st.session_state.custom_dims["h"] = st.number_input("Custom height (mm)", value=st.session_state.custom_dims["h"])
-        st.session_state.custom_dims["m"] = st.number_input("Custom max payload (kg)", value=st.session_state.custom_dims["m"])
+        # Button to add a new custom container
+        if st.button("Add Custom Container"):
+            st.session_state.custom_containers.append({"l": 6000, "w": 2400, "h": 2400, "m": 25000})
+            st.session_state.custom_container_version += 1
+            with open('custom_containers.json', 'w') as f:
+                json.dump(st.session_state.custom_containers, f, indent=2)
+            st.rerun()
 
     st.session_state.selected_container_quantity = st.number_input(
         "Number of selected containers:",
