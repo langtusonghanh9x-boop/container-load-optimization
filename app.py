@@ -437,7 +437,6 @@ if st.session_state.current_tab == "PRODUCTS":
     with col_h7: st.markdown("**Color**")
     with col_h8: st.markdown("**Del**")
 
-    # Update product rows while keeping Streamlit state stable
     temp_list = []
     to_delete = None
     
