@@ -503,19 +503,11 @@ if st.session_state.current_tab == "PRODUCTS":
 
 
 # ==========================================
-# SCREEN 2: CONTAINERS & TRUCKS
-# ==========================================
-elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
-    st.subheader("Step 2: Select Container / Truck")
-    
-    container_options = list(CONTAINER_DICT.keys()) + ["Custom"]
-    selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
-    st.session_state.selected_container = st.selectbox(
-        "Select the target container type:",
-        container_options,
-        index=selected_container_index
-    )
-    
+                    st.session_state.custom_containers.append({"name": new_name.strip(), "l": new_l, "w": new_w, "h": new_h, "m": new_m})
+                    save_custom_containers(st.session_state.custom_containers)
+                    st.rerun()
+
+    # Custom dimension inputs – shown only when "Custom" is selected (ad‑hoc entry)
     if st.session_state.selected_container == "Custom":
         if 'custom_dims' not in st.session_state:
             st.session_state.custom_dims = {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
@@ -524,6 +516,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         st.session_state.custom_dims["h"] = st.number_input("Custom height (mm)", value=st.session_state.custom_dims["h"])
         st.session_state.custom_dims["m"] = st.number_input("Custom max payload (kg)", value=st.session_state.custom_dims["m"])
 
+    # Keep the original quantity input unchanged
     st.session_state.selected_container_quantity = st.number_input(
         "Number of selected containers:",
         min_value=1,
