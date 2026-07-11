@@ -10,10 +10,11 @@ STANDARD_CONTAINERS = {
 
 
 def get_container_spec(name, custom_dims=None):
-    if name == "Custom":
-        custom_dims = custom_dims or {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
-        return ContainerSpec("Custom", custom_dims["l"], custom_dims["w"], custom_dims["h"], custom_dims["m"])
-    return STANDARD_CONTAINERS[name]
+    if name in STANDARD_CONTAINERS:
+        return STANDARD_CONTAINERS[name]
+    # For custom containers, use provided dimensions (fallback defaults)
+    custom = custom_dims or {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
+    return ContainerSpec(name, custom["l"], custom["w"], custom["h"], custom["m"])
 
 
 def catalog_smallest_first():
