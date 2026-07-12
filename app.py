@@ -29,6 +29,7 @@ import io
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 import pandas as pd
+import streamlit as st
 import json
 from container_optimizer.cargo import product_rows_to_cargo_items
 from container_optimizer.containers import get_container_spec
