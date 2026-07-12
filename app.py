@@ -87,8 +87,14 @@ if 'load_direction' not in st.session_state:
     st.session_state.load_direction = "inside_out"
 if 'heavy_priority' not in st.session_state:
     st.session_state.heavy_priority = "heavy_bottom"
-if 'placement_strategy' not in st.session_state:
-    st.session_state.placement_strategy = "stable_floor_first"
+    if 'placement_strategy' not in st.session_state:
+        st.session_state.placement_strategy = "stable_floor_first"
+    # Second container selection (optional)
+    if 'selected_container2' not in st.session_state:
+        st.session_state.selected_container2 = ""
+    if 'selected_container2_quantity' not in st.session_state:
+        st.session_state.selected_container2_quantity = 1
+
 if 'max_additional_containers' not in st.session_state:
     st.session_state.max_additional_containers = 10
 if 'contact_compaction' not in st.session_state:
