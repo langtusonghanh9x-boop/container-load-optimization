@@ -25,7 +25,9 @@ if not ENGINE_DIR.exists() and all((APP_DIR / filename).exists() for filename in
     package.__path__ = [str(APP_DIR)]
     sys.modules["container_optimizer"] = package
 
-import streamlit as st
+import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 import pandas as pd
 import json
 from container_optimizer.cargo import product_rows_to_cargo_items
@@ -833,10 +835,47 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             selected_variant = selected_strategies[st.session_state.variant_idx]
             # Determine which containers are available (from stored state)
             containers_list = st.session_state.loading_plans.get('containers', [st.session_state.selected_container])
-            selected_container_view = st.selectbox(
-                "Select container for results",
-                containers_list,
-                key="result_container_select"
+        # Global notes for PDF (applies to all pages)
+        if 'pdf_notes' not in st.session_state:
+            st.session_state.pdf_notes = ""
+        pdf_notes = st.text_area("Global notes for PDF (applies to all pages)", value=st.session_state.pdf_notes, key="global_pdf_notes")
+        # Button to generate PDF
+        if st.button("Download PDF (includes 3D images & notes)"):
+            # Create PDF in memory
+            pdf_buffer = io.BytesIO()
+            c = canvas.Canvas(pdf_buffer, pagesize=letter)
+            width, height = letter
+            # Iterate containers
+            for idx, container in enumerate(loading_plan.containers, start=1):
+                # Generate PNG image for container
+                fig = build_container_figure(container)
+                img_buf = io.BytesIO()
+                fig.write_image(img_buf, format="png")
+                img_buf.seek(0)
+                # Add image to PDF
+                c.drawImage(ImageReader(img_buf), 50, 250, width=500, preserveAspectRatio=True, mask='auto')
+                # Add container title
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(50, 750, f"Container {idx}: {container.spec.name}")
+                # Add notes (container-specific + global)
+                notes_list = []
+                notes_list.extend(container.suggestions)
+                notes_list.extend(container.warnings)
+                notes_text = "\n".join(notes_list) if notes_list else "No container notes."
+                full_notes = pdf_notes + "\n\n" + notes_text
+                c.setFont("Helvetica", 10)
+                text_obj = c.beginText(50, 200)
+                for line in full_notes.split('\n'):
+                    text_obj.textLine(line)
+                c.drawText(text_obj)
+                c.showPage()
+            c.save()
+            pdf_buffer.seek(0)
+            st.download_button(
+                label="Download PDF",
+                data=pdf_buffer,
+                file_name="loading_results.pdf",
+                mime="application/pdf"
             )
             # Composite key to retrieve the correct loading plan
             plan_key = f"{selected_container_view}|{selected_variant}"
