@@ -511,10 +511,6 @@ if st.session_state.current_tab == "PRODUCTS":
     st.write("---")
     if st.button("Next", type="primary"):
         st.session_state.current_tab = "CONTAINERS & TRUCKS"
-        st.rerun()
-
-
-# ==========================================
 
     # Move from step 1 to step 2
     st.write("---")
@@ -536,9 +532,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         container_options,
         index=selected_container_index
     )
-    # If a truck is selected, inform the user that extra containers will be the same truck type
-    if st.session_state.selected_container.startswith("Xe "):
-        st.info("Additional containers will be of the same truck type as the selected container.")
+
     
     # If a custom container is selected, show its editable fields
     if st.session_state.selected_container not in CONTAINER_DICT:
