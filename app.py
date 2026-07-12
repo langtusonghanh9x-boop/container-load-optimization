@@ -813,12 +813,12 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                         )
                         try:
                             plan = calculate_loading_cached(
-                                st.session_state.product_list,
-                                cont,
-                                custom_dims,
-                                int(st.session_state.selected_container_quantity),
-                                config
-                            )
+    st.session_state.product_list,
+    cont,
+    custom_dims,
+    1 if len(st.session_state.get('selected_containers', [])) > 1 else int(st.session_state.selected_container_quantity),
+    config
+)
                         except Exception as exc:
                             st.warning(f"Failed to compute loading for container '{cont}' strategy '{strat}': {exc}")
                             plan = None
