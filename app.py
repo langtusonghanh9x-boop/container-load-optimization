@@ -896,7 +896,30 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             f"{container.volume_pct:.1f}% volume, {container.weight_pct:.1f}% weight"
         )
         with st.expander(title, expanded=index == 1):
-            st.plotly_chart(build_container_figure(container), use_container_width=True)
+            fig = build_container_figure(container)
+            st.plotly_chart(fig, use_container_width=True)
+            # Download 3D image as PNG
+            import io
+            img_buffer = io.BytesIO()
+            fig.write_image(img_buffer, format="png")
+            img_buffer.seek(0)
+            st.download_button(
+                label="Download 3D image",
+                data=img_buffer,
+                file_name=f"{selected_container_view}_container_{index}.png",
+                mime="image/png",
+            )
+            # Compile notes (suggestions and warnings)
+            notes = []
+            notes.extend(container.suggestions)
+            notes.extend(container.warnings)
+            notes_text = "\n".join(notes) if notes else "No notes."
+            st.download_button(
+                label="Download notes",
+                data=notes_text.encode("utf-8"),
+                file_name=f"{selected_container_view}_container_{index}_notes.txt",
+                mime="text/plain",
+            )
             rows = summarize_container(container)
             render_color_summary_table(rows)
 
