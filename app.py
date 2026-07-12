@@ -542,11 +542,28 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     
     container_options = list(CONTAINER_DICT.keys()) + [c.get("name", f"Custom {i+1}") for i, c in enumerate(st.session_state.custom_containers)]
     selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
-    st.session_state.selected_container = st.selectbox(
-        "Select the target container type:",
+    # Multi-select container types (allow up to 2)
+    selected_containers = st.multiselect(
+        "Select container type(s) (max 2):",
         container_options,
-        index=selected_container_index
+        default=[st.session_state.selected_container] if st.session_state.selected_container else [],
+        help="You can choose up to two container or truck types for this calculation."
     )
+    if len(selected_containers) > 2:
+        st.warning("Please select at most two containers/trucks.")
+        selected_containers = selected_containers[:2]
+    # Store in session state; use the first selected as the primary for downstream single-value usages
+    st.session_state.selected_containers = selected_containers
+    if selected_containers:
+        st.session_state.selected_container = selected_containers[0]
+    else:
+        st.session_state.selected_container = ""
+    # Preserve original selectbox UI for backward compatibility (hidden)
+    # st.session_state.selected_container = st.selectbox(
+    #    "Select the target container type:",
+    #    container_options,
+    #    index=selected_container_index
+    # )
 
     # Upload custom containers configuration (JSON)
     uploaded_containers_file = st.file_uploader(
@@ -779,38 +796,51 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 "fill_width_before_length": "Width first"
             }
             selected_strategies = st.session_state.get('selected_strategies', [st.session_state.placement_strategy])
-            # Initialize or refresh loading plans if the strategy list changed
-            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('strategies') != selected_strategies):
-                st.session_state.loading_plans = {'strategies': selected_strategies}
-                for strat in selected_strategies:
-                    config = make_loading_config(
-                        load_direction=st.session_state.load_direction,
-                        heavy_priority=st.session_state.heavy_priority,
-                        placement_strategy=strat,
-                        max_additional_containers=int(st.session_state.max_additional_containers),
-                        minimum_support_ratio=float(st.session_state.minimum_support_ratio),
-                        contact_compaction=bool(st.session_state.contact_compaction),
-                    )
-                    try:
-                        plan = calculate_loading_cached(
-                            st.session_state.product_list,
-                            st.session_state.selected_container,
-                            custom_dims,
-                            int(st.session_state.selected_container_quantity),
-                            config
+            # Determine containers to compute (list)
+            containers_to_compute = st.session_state.get('selected_containers', [st.session_state.selected_container])
+            # Initialize or refresh loading plans if strategies or containers changed
+            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('strategies') != selected_strategies) or (st.session_state.loading_plans.get('containers') != containers_to_compute):
+                st.session_state.loading_plans = {'strategies': selected_strategies, 'containers': containers_to_compute}
+                for cont in containers_to_compute:
+                    for strat in selected_strategies:
+                        config = make_loading_config(
+                            load_direction=st.session_state.load_direction,
+                            heavy_priority=st.session_state.heavy_priority,
+                            placement_strategy=strat,
+                            max_additional_containers=int(st.session_state.max_additional_containers),
+                            minimum_support_ratio=float(st.session_state.minimum_support_ratio),
+                            contact_compaction=bool(st.session_state.contact_compaction),
                         )
-                    except Exception as exc:
-                        st.warning(f"Failed to compute loading for strategy '{strat}': {exc}")
-                        plan = None
-                    st.session_state.loading_plans[strat] = plan
+                        try:
+                            plan = calculate_loading_cached(
+                                st.session_state.product_list,
+                                cont,
+                                custom_dims,
+                                int(st.session_state.selected_container_quantity),
+                                config
+                            )
+                        except Exception as exc:
+                            st.warning(f"Failed to compute loading for container '{cont}' strategy '{strat}': {exc}")
+                            plan = None
+                        # Store with composite key
+                        st.session_state.loading_plans[f"{cont}|{strat}"] = plan
             # Initialize variant navigation index
             if "variant_idx" not in st.session_state or st.session_state.variant_idx >= len(selected_strategies):
                 st.session_state.variant_idx = 0
 
             # Navigation controls
-# Variant navigation UI moved to after 3D models section
+            # Variant navigation UI moved to after 3D models section
             selected_variant = selected_strategies[st.session_state.variant_idx]
-            loading_plan = st.session_state.loading_plans.get(selected_variant)
+            # Determine which containers are available (from stored state)
+            containers_list = st.session_state.loading_plans.get('containers', [st.session_state.selected_container])
+            selected_container_view = st.selectbox(
+                "Select container for results",
+                containers_list,
+                key="result_container_select"
+            )
+            # Composite key to retrieve the correct loading plan
+            plan_key = f"{selected_container_view}|{selected_variant}"
+            loading_plan = st.session_state.loading_plans.get(plan_key)
     except Exception as exc:
         st.warning("Could not complete the optimization with the current data.")
         st.info("Check cargo dimensions, quantities, and weights. You can also reduce the lot size or try a larger container.")
