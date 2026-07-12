@@ -511,11 +511,6 @@ if st.session_state.current_tab == "PRODUCTS":
     st.write("---")
     if st.button("Next", type="primary"):
         st.session_state.current_tab = "CONTAINERS & TRUCKS"
-
-    # Move from step 1 to step 2
-    st.write("---")
-    if st.button("Next", type="primary"):
-        st.session_state.current_tab = "CONTAINERS & TRUCKS"
         st.rerun()
 
 
