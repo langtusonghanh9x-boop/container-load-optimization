@@ -528,6 +528,39 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         index=selected_container_index
     )
 
+    # Upload custom containers configuration (JSON)
+    uploaded_containers_file = st.file_uploader(
+        "Import Custom Containers (JSON)",
+        type=["json"],
+        label_visibility="collapsed"
+    )
+    if uploaded_containers_file is not None:
+        try:
+            uploaded_bytes = uploaded_containers_file.read()
+            # Decode as UTF-8 and parse JSON
+            custom_containers_data = json.loads(uploaded_bytes.decode("utf-8"))
+            if isinstance(custom_containers_data, list):
+                # Validate required keys in each container definition
+                required_keys = {"name", "l", "w", "h", "m"}
+                valid = all(required_keys.issubset(set(cont.keys())) for cont in custom_containers_data)
+                if valid:
+                    st.session_state.custom_containers = custom_containers_data
+                    # Persist to file
+                    with open('custom_containers.json', 'w') as f:
+                        json.dump(st.session_state.custom_containers, f, indent=2)
+                    st.success("Custom containers imported successfully.")
+                    # Reset selection to first imported container
+                    if st.session_state.custom_containers:
+                        st.session_state.selected_container = st.session_state.custom_containers[0]["name"]
+                    else:
+                        st.session_state.selected_container = list(CONTAINER_DICT.keys())[0]
+                    st.rerun()
+                else:
+                    st.warning("Invalid container format. Each item must include name, l, w, h, m.")
+            else:
+                st.warning("Uploaded JSON must be a list of container objects.")
+        except Exception as e:
+            st.warning(f"Failed to import custom containers: {e}")
     
     # If a custom container is selected, show its editable fields
     if st.session_state.selected_container not in CONTAINER_DICT:
