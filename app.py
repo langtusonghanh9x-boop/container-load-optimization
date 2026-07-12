@@ -496,13 +496,27 @@ if st.session_state.current_tab == "PRODUCTS":
             st.rerun()
     with add_cols[2]:
         if st.button("Reset All"):
+            # Reset product list to defaults
             st.session_state.product_list = [
                 {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
                 {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-                {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
+                {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"},
             ]
             st.session_state.product_list_version += 1
+            # Reset all calculation related state
             st.session_state.calculation_requested = False
+            st.session_state.selected_container_quantity = 1
+            st.session_state.loading_plans = {}
+            st.session_state.variant_idx = 0
+            st.session_state.selected_strategies = []
+            st.session_state.max_additional_containers = 10
+            st.session_state.contact_compaction = True
+            st.session_state.minimum_support_ratio = 0.65
+            # Clear any cached data
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
             clear_product_input_state()
             st.rerun()
     st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
