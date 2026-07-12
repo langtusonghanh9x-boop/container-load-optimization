@@ -889,9 +889,15 @@ elif st.session_state.current_tab == "STUFFING RESULT":
 
     st.write("---")
     st.subheader("3D Loading Models")
-    # Variant navigation UI (single instance)
-    if "variant_idx" not in st.session_state:
-        st.session_state.variant_idx = 0
+    # Container selection (single click via radio)
+    containers_list = st.session_state.loading_plans.get('containers', [st.session_state.selected_container])
+    selected_container_view = st.radio(
+        "Select container for results",
+        containers_list,
+        index=0,
+        key="result_container_radio"
+    )
+    # Variant navigation UI
     col_prev, col_name, col_next = st.columns([1, 2, 1])
     with col_prev:
         if st.button("← Prev", key="prev_variant") and st.session_state.variant_idx > 0:
@@ -904,10 +910,6 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             st.session_state.variant_idx += 1
     # Update selected variant and loading plan after navigation
     selected_variant = selected_strategies[st.session_state.variant_idx]
-    loading_plan = st.session_state.loading_plans.get(selected_variant)
-    for index, container in enumerate(loading_plan.containers, start=1):
-        title = (
-            f"Container {index}: {container.spec.name} - {container.package_count} packages, "
             f"{container.volume_pct:.1f}% volume, {container.weight_pct:.1f}% weight"
         )
         with st.expander(title, expanded=index == 1):
