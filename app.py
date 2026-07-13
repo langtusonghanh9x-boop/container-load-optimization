@@ -171,6 +171,78 @@ def make_loading_config(**kwargs):
         kwargs = {key: value for key, value in kwargs.items() if key in fields}
     return LoadingConfig(**kwargs)
 
+
+CARGO_TYPE_OPTIONS = ["Box", "Big Bags", "Sacks", "Barrels", "Roll", "Pipes", "Bulk"]
+
+
+@st.dialog("Add Product", width="large")
+def show_add_product_dialog():
+    st.caption("1. SELECT CARGO TYPE")
+    cargo_type = st.radio(
+        "Cargo type",
+        CARGO_TYPE_OPTIONS,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="new_product_cargo_type",
+    )
+
+    st.caption("2. SELECT CARGO DIMENSIONS")
+    product_cols = st.columns(3)
+    new_name = product_cols[0].text_input("Product Name", value="New Product", key="new_product_name")
+    new_color = product_cols[1].color_picker("Color", value="#8e43d6", key="new_product_color")
+    new_qty = product_cols[2].number_input("Quantity", min_value=1, value=1, step=1, key="new_product_qty")
+
+    if cargo_type in ("Roll", "Pipes"):
+        dimension_cols = st.columns(3)
+        diameter = dimension_cols[0].number_input("Diameter (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_diameter")
+        cylinder_height = dimension_cols[1].number_input("Height (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_cylinder_height")
+        new_length, new_width, new_height = cylinder_height, diameter, diameter
+    else:
+        dimension_cols = st.columns(3)
+        new_length = dimension_cols[0].number_input("Length (mm)", min_value=1.0, value=500.0, step=10.0, key="new_product_length")
+        new_width = dimension_cols[1].number_input("Width (mm)", min_value=1.0, value=400.0, step=10.0, key="new_product_width")
+        new_height = dimension_cols[2].number_input("Height (mm)", min_value=1.0, value=300.0, step=10.0, key="new_product_height")
+    new_weight = st.number_input("Weight (kg)", min_value=0.0, value=10.0, step=1.0, key="new_product_weight")
+
+    settings_cols = st.columns(2)
+    with settings_cols[0]:
+        st.caption("3. SPACING SETTINGS")
+        tilt_to_length = st.checkbox("Tilt to Length", key="new_product_tilt_length")
+        tilt_to_width = st.checkbox("Tilt to Width", key="new_product_tilt_width")
+    with settings_cols[1]:
+        st.caption("4. STUFFING SETTINGS")
+        enable_layers = st.checkbox("Layers Count", key="new_product_enable_layers")
+        max_layers = st.number_input("Maximum layers", min_value=1, max_value=100, value=1, step=1, disabled=not enable_layers, key="new_product_max_layers")
+        enable_mass = st.checkbox("Mass", key="new_product_enable_mass")
+        max_stack_mass = st.number_input("Maximum load on this product (kg)", min_value=0.0, value=0.0, step=1.0, disabled=not enable_mass, key="new_product_max_mass")
+        enable_height = st.checkbox("Height", key="new_product_enable_height")
+        max_stack_height = st.number_input("Maximum stack height (mm)", min_value=1.0, value=1000.0, step=10.0, disabled=not enable_height, key="new_product_max_height")
+        disable_stacking = st.checkbox("Disable stacking", key="new_product_disable_stacking")
+
+    action_cols = st.columns(2)
+    if action_cols[0].button("Cancel", use_container_width=True, key="new_product_cancel"):
+        st.rerun()
+    if action_cols[1].button("Add", type="primary", use_container_width=True, key="new_product_add"):
+        st.session_state.product_list.append({
+            "name": new_name or "New Product",
+            "l": new_length,
+            "w": new_width,
+            "h": new_height,
+            "wt": new_weight,
+            "qty": new_qty,
+            "color": new_color,
+            "cargo_type": cargo_type,
+            "loading_order": None,
+            "tilt_to_length": tilt_to_length,
+            "tilt_to_width": tilt_to_width,
+            "max_layers": int(max_layers) if enable_layers else None,
+            "max_stack_mass_kg": max_stack_mass if enable_mass else None,
+            "max_stack_height_mm": max_stack_height if enable_height else None,
+            "disable_stacking": disable_stacking,
+        })
+        st.session_state.product_list_version += 1
+        st.rerun()
+
 # --- CLICKABLE TAB NAVIGATION ---
 nav_cols = st.columns(3)
 with nav_cols[0]:
@@ -468,7 +540,7 @@ if st.session_state.current_tab == "PRODUCTS":
     for i, prod in enumerate(st.session_state.product_list):
         cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.5])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
-        cargo_type_options = ["General Cargo", "Lumber Bundle"]
+        cargo_type_options = ["General Cargo", "Lumber Bundle", *CARGO_TYPE_OPTIONS]
         current_cargo_type = prod.get("cargo_type", "General Cargo")
         cargo_type = cols[1].selectbox("", cargo_type_options, index=cargo_type_options.index(current_cargo_type) if current_cargo_type in cargo_type_options else 0, key=f"type_{product_key_version}_{i}", label_visibility="collapsed")
         dim_step = 1 if cargo_type == "Lumber Bundle" else 10
@@ -527,8 +599,7 @@ if st.session_state.current_tab == "PRODUCTS":
     add_cols = st.columns([1.2, 1.5, 1.5, 6])
     with add_cols[0]:
         if st.button("Add Product"):
-            st.session_state.show_add_product_form = True
-            st.rerun()
+            show_add_product_dialog()
     with add_cols[1]:
         if st.button("Add Lumber Bundle"):
             st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
@@ -560,62 +631,6 @@ if st.session_state.current_tab == "PRODUCTS":
             clear_product_input_state()
             st.rerun()
 
-    if st.session_state.get("show_add_product_form", False):
-        st.write("---")
-        st.subheader("Add Product")
-        with st.form("add_product_form"):
-            product_cols = st.columns(4)
-            new_name = product_cols[0].text_input("Product name", value="New Item")
-            new_color = product_cols[1].color_picker("Color", value="#e74c3c")
-            new_qty = product_cols[2].number_input("Quantity", min_value=1, value=1, step=1)
-            new_weight = product_cols[3].number_input("Weight (kg)", min_value=0.0, value=10.0, step=1.0)
-            dimension_cols = st.columns(3)
-            new_length = dimension_cols[0].number_input("Length (mm)", min_value=1.0, value=500.0, step=10.0)
-            new_width = dimension_cols[1].number_input("Width (mm)", min_value=1.0, value=400.0, step=10.0)
-            new_height = dimension_cols[2].number_input("Height (mm)", min_value=1.0, value=300.0, step=10.0)
-
-            st.caption("Spacing settings")
-            tilt_cols = st.columns(2)
-            tilt_to_length = tilt_cols[0].checkbox("Tilt to Length")
-            tilt_to_width = tilt_cols[1].checkbox("Tilt to Width")
-
-            st.caption("Stuffing settings — leave a limit unchecked to use normal loading rules.")
-            enable_layers = st.checkbox("Layers Count")
-            max_layers = st.number_input("Maximum layers", min_value=1, max_value=100, value=1, step=1, disabled=not enable_layers)
-            enable_mass = st.checkbox("Mass")
-            max_stack_mass = st.number_input("Maximum load on this product (kg)", min_value=0.0, value=0.0, step=1.0, disabled=not enable_mass)
-            enable_height = st.checkbox("Height")
-            max_stack_height = st.number_input("Maximum stack height (mm)", min_value=1.0, value=1000.0, step=10.0, disabled=not enable_height)
-            disable_stacking = st.checkbox("Disable stacking")
-
-            submit_cols = st.columns(2)
-            add_submitted = submit_cols[0].form_submit_button("Add", type="primary")
-            cancel_submitted = submit_cols[1].form_submit_button("Cancel")
-
-            if add_submitted:
-                st.session_state.product_list.append({
-                    "name": new_name or "New Item",
-                    "l": new_length,
-                    "w": new_width,
-                    "h": new_height,
-                    "wt": new_weight,
-                    "qty": new_qty,
-                    "color": new_color,
-                    "cargo_type": "General Cargo",
-                    "loading_order": None,
-                    "tilt_to_length": tilt_to_length,
-                    "tilt_to_width": tilt_to_width,
-                    "max_layers": int(max_layers) if enable_layers else None,
-                    "max_stack_mass_kg": max_stack_mass if enable_mass else None,
-                    "max_stack_height_mm": max_stack_height if enable_height else None,
-                    "disable_stacking": disable_stacking,
-                })
-                st.session_state.product_list_version += 1
-                st.session_state.show_add_product_form = False
-                st.rerun()
-            if cancel_submitted:
-                st.session_state.show_add_product_form = False
-                st.rerun()
     st.caption("General Cargo dimensions use mm. Lumber Bundle dimensions use inch and are converted to mm automatically.")
 
     # Move from step 1 to step 2
