@@ -1,4 +1,4 @@
-from .containers import catalog_smallest_first
+from .containers import catalog_smallest_first, is_truck_spec
 from .packing import can_fit_item
 
 
@@ -15,8 +15,8 @@ class ContainerManager:
         if not self.allow_auto_add:
             return []
         candidates = []
-        for spec in catalog_smallest_first():
+        vehicle_type = "truck" if is_truck_spec(self.selected_spec) else "container"
+        for spec in catalog_smallest_first(vehicle_type=vehicle_type):
             if all(can_fit_item(item, spec) for item in items):
                 candidates.append(spec)
         return candidates
-

@@ -25,5 +25,21 @@ def get_container_spec(name, custom_dims=None):
     return ContainerSpec(name, custom["l"], custom["w"], custom["h"], custom["m"])
 
 
-def catalog_smallest_first():
-    return sorted(STANDARD_CONTAINERS.values(), key=lambda spec: spec.volume_m3)
+def is_truck_spec(spec):
+    """Return whether a catalog specification is a truck."""
+    return spec.name.startswith("Truck ")
+
+
+def catalog_smallest_first(vehicle_type=None):
+    """Return catalog entries ordered by volume, optionally by vehicle type.
+
+    ``vehicle_type`` may be ``"container"`` or ``"truck"``.  Keeping the
+    automatic additions within the selected type prevents a container loading
+    plan from unexpectedly adding trucks, and vice versa.
+    """
+    specs = STANDARD_CONTAINERS.values()
+    if vehicle_type == "truck":
+        specs = (spec for spec in specs if is_truck_spec(spec))
+    elif vehicle_type == "container":
+        specs = (spec for spec in specs if not is_truck_spec(spec))
+    return sorted(specs, key=lambda spec: spec.volume_m3)

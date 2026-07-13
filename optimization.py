@@ -42,6 +42,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     warnings = []
     suggestions = []
     manager = ContainerManager(selected_spec, selected_quantity, allow_auto_add)
+    vehicle_label = "xe tai" if selected_spec.name.startswith("Truck ") else "container"
 
     impossible_for_selected = [item for item in items if not can_fit_item(item, selected_spec)]
     if impossible_for_selected:
@@ -61,7 +62,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     ]
     if impossible_for_catalog:
         warnings.append(
-            f"{len(impossible_for_catalog)} kien du khong phu hop bat ky container tieu chuan nao trong catalog."
+            f"{len(impossible_for_catalog)} kien du khong phu hop bat ky {vehicle_label} tieu chuan nao trong catalog."
         )
 
     packable_remaining = [item for item in remaining if item not in impossible_for_catalog]
@@ -76,14 +77,14 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
             feasible_options.append((len(extra_containers), spec.volume_m3, spec, extra_containers))
 
     if not feasible_options:
-        warnings.append("Khong tim duoc phuong an container bo sung du chua phan hang du.")
-        suggestions.append("Thu tang so luong container da chon, dung container lon hon hoac chia lo hang.")
+        warnings.append("Khong tim duoc phuong an phuong tien bo sung du chua phan hang du.")
+        suggestions.append(f"Thu tang so luong {vehicle_label} da chon, dung {vehicle_label} lon hon hoac chia lo hang.")
         return LoadingPlan(containers, len(items), remaining, warnings, suggestions)
 
     _, _, chosen_spec, extra_containers = sorted(feasible_options, key=lambda option: (option[0], option[1]))[0]
     containers.extend(extra_containers)
     final_leftover = impossible_for_catalog
     suggestions.append(
-        f"Tu bo sung {len(extra_containers)} container {chosen_spec.name} cho phan hang du, uu tien it container nhat va container nho nhat du chua."
+        f"Tu bo sung {len(extra_containers)} {vehicle_label} {chosen_spec.name} cho phan hang du, uu tien it phuong tien nhat va kich thuoc nho nhat du chua."
     )
     return LoadingPlan(containers, len(items), final_leftover, warnings, suggestions)

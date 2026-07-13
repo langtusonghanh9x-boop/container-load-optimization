@@ -853,8 +853,10 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             )
     
     with config_cols[3]:
+        selected_vehicle_is_truck = st.session_state.selected_container.startswith("Truck ")
+        auto_add_label = "Max auto trucks" if selected_vehicle_is_truck else "Max auto containers"
         st.session_state.max_additional_containers = st.number_input(
-            "Max auto containers",
+            auto_add_label,
             min_value=0,
             max_value=50,
             value=int(st.session_state.max_additional_containers),
