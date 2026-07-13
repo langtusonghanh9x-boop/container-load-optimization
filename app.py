@@ -521,9 +521,9 @@ if st.session_state.current_tab == "PRODUCTS":
             st.session_state.max_additional_containers = 10
             st.session_state.contact_compaction = True
             st.session_state.minimum_support_ratio = 0.65
-            # Clear any cached data
+            # Clear only the loading calculation cache; avoid the global cache confirmation.
             try:
-                st.cache_data.clear()
+                calculate_loading_cached.clear()
             except Exception:
                 pass
             clear_product_input_state()
@@ -904,7 +904,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         with action_cols[1]:
             if st.button("Reset All", use_container_width=True):
                 st.session_state.calculation_requested = False
-                st.cache_data.clear()
+                calculate_loading_cached.clear()
                 st.session_state.current_tab = "PRODUCTS"
                 st.rerun()
         st.stop()
@@ -1015,7 +1015,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
     with action_cols[2]:
         if st.button("Reset All", use_container_width=True):
             st.session_state.calculation_requested = False
-            st.cache_data.clear()
+            calculate_loading_cached.clear()
             st.session_state.current_tab = "PRODUCTS"
             st.rerun()
 
