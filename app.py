@@ -164,9 +164,10 @@ def render_color_summary_table(rows):
     ]
     for row in rows:
         color = row.get("Color", "#7f8c8d")
+        color_name = color_name_bilingual(color)
         html.append(
             "<tr style='border-bottom:1px solid #f1f5f9;'>"
-            f"<td style='padding:8px;'><span style='display:inline-block;width:18px;height:18px;border-radius:4px;background:{color};border:1px solid #94a3b8;'></span></td>"
+            f"<td style='padding:8px; white-space:nowrap;'><span style='display:inline-block;width:18px;height:18px;border-radius:4px;background:{color};border:1px solid #94a3b8;vertical-align:middle;'></span><span style='margin-left:8px;'>{color_name}</span></td>"
             f"<td style='padding:8px; font-weight:600;'>{row['Name']}</td>"
             f"<td style='padding:8px; text-align:right;'>{row['Packages']}</td>"
             f"<td style='padding:8px; text-align:right;'>{row['Volume (m3)']:.3f}</td>"
@@ -175,6 +176,32 @@ def render_color_summary_table(rows):
         )
     html.append("</tbody></table>")
     st.markdown("".join(html), unsafe_allow_html=True)
+
+
+def color_name_bilingual(hex_color):
+    """Return the closest common colour name in English with a Vietnamese subtitle."""
+    named_colors = {
+        "Black (Đen)": (0, 0, 0),
+        "White (Trắng)": (255, 255, 255),
+        "Gray (Xám)": (127, 140, 141),
+        "Red (Đỏ)": (231, 76, 60),
+        "Orange (Cam)": (230, 126, 34),
+        "Yellow (Vàng)": (241, 196, 15),
+        "Green (Xanh lá)": (46, 204, 113),
+        "Cyan (Xanh ngọc)": (26, 188, 156),
+        "Blue (Xanh dương)": (52, 152, 219),
+        "Purple (Tím)": (155, 89, 182),
+        "Pink (Hồng)": (236, 112, 193),
+        "Brown (Nâu)": (142, 90, 42),
+    }
+    clean = str(hex_color).lstrip("#")
+    if len(clean) != 6:
+        return "Color (Màu)"
+    try:
+        rgb = tuple(int(clean[index:index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        return "Color (Màu)"
+    return min(named_colors, key=lambda name: sum((rgb[i] - value[i]) ** 2 for i, value in enumerate(named_colors[name])))
 
 
 def make_loading_config(**kwargs):
@@ -215,7 +242,7 @@ def build_3d_html(containers, title):
     ).encode("utf-8")
 
 
-def build_loading_pdf(containers, title, notes):
+def build_loading_pdf(containers, title):
     """Create a concise PDF report, with a 3D preview when image export is available."""
     pdf_buffer = io.BytesIO()
     report = canvas.Canvas(pdf_buffer, pagesize=letter)
@@ -258,25 +285,17 @@ def build_loading_pdf(containers, title, notes):
             report.drawRightString(570, row_y, f"{row['Weight (kg)']:.1f}")
             row_y -= 14
 
-        report.setFont("Helvetica-Bold", 10)
-        report.drawString(42, row_y - 6, "Plan notes")
-        report.setFont("Helvetica", 9)
-        text = report.beginText(42, row_y - 21)
-        for note in notes or ["No loading-plan notes."]:
-            for line in str(note).splitlines() or [""]:
-                text.textLine(line)
-        report.drawText(text)
         report.showPage()
     report.save()
     return pdf_buffer.getvalue()
 
 
-def build_download_bundle(containers, title, filename_stem, notes):
+def build_download_bundle(containers, title, filename_stem):
     """Bundle one 3D HTML model and one matching PDF into a ZIP download."""
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr(f"{filename_stem}_3d.html", build_3d_html(containers, title))
-        bundle.writestr(f"{filename_stem}.pdf", build_loading_pdf(containers, title, notes))
+        bundle.writestr(f"{filename_stem}.pdf", build_loading_pdf(containers, title))
     return archive.getvalue()
 
 
@@ -1083,14 +1102,12 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         if loading_plan is None:
             raise ValueError("Loading plan not found for the selected configuration.")
 
-        plan_notes = [*loading_plan.suggestions, *loading_plan.warnings]
         st.download_button(
             label="Download total",
             data=build_download_bundle(
                 loading_plan.containers,
                 "Total Loading Result",
                 "total_loading_result",
-                plan_notes,
             ),
             file_name="total_loading_result.zip",
             mime="application/zip",
@@ -1121,7 +1138,9 @@ elif st.session_state.current_tab == "STUFFING RESULT":
     detail_df = detail_plan_df(loading_plan)
 
     metric_cols = st.columns(5)
-    metric_cols[0].metric("Containers Used", len(loading_plan.containers))
+    selected_vehicle_is_truck = selected_container_view.startswith("Truck ")
+    used_vehicle_label = "Trucks Used" if selected_vehicle_is_truck else "Containers Used"
+    metric_cols[0].metric(used_vehicle_label, len(loading_plan.containers))
     metric_cols[1].metric("Loaded / Total", f"{loading_plan.loaded_count}/{loading_plan.requested_count}")
     metric_cols[2].metric("Unloaded", loading_plan.leftover_count)
     metric_cols[3].metric("Total Volume", f"{loading_plan.total_volume_m3:.2f} m3")
@@ -1160,7 +1179,6 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                     [container],
                     f"Loading Result - {container.spec.name} {index}",
                     f"{safe_download_name(container.spec.name)}_{index}",
-                    plan_notes,
                 ),
                 file_name=f"{safe_download_name(container.spec.name)}_{index}_loading_result.zip",
                 mime="application/zip",
