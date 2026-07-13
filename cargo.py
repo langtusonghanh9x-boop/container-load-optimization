@@ -32,5 +32,6 @@ def product_rows_to_cargo_items(products):
                 max_stack_mass_kg=product.get("max_stack_mass_kg") or None,
                 max_stack_height_mm=product.get("max_stack_height_mm") or None,
                 disable_stacking=bool(product.get("disable_stacking", False)),
+                shape=product.get("shape", "cylinder" if cargo_type in {"Barrels", "Roll", "Pipes"} else "box"),
             ))
     return items

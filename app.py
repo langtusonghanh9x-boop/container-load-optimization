@@ -192,7 +192,7 @@ def show_add_product_dialog():
     new_color = product_cols[1].color_picker("Color", value="#8e43d6", key="new_product_color")
     new_qty = product_cols[2].number_input("Quantity", min_value=1, value=1, step=1, key="new_product_qty")
 
-    if cargo_type in ("Roll", "Pipes"):
+    if cargo_type in ("Barrels", "Roll", "Pipes"):
         dimension_cols = st.columns(3)
         diameter = dimension_cols[0].number_input("Diameter (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_diameter")
         cylinder_height = dimension_cols[1].number_input("Height (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_cylinder_height")
@@ -232,6 +232,7 @@ def show_add_product_dialog():
             "qty": new_qty,
             "color": new_color,
             "cargo_type": cargo_type,
+            "shape": "cylinder" if cargo_type in ("Barrels", "Roll", "Pipes") else "box",
             "loading_order": None,
             "tilt_to_length": tilt_to_length,
             "tilt_to_width": tilt_to_width,
@@ -544,11 +545,11 @@ if st.session_state.current_tab == "PRODUCTS":
         current_cargo_type = prod.get("cargo_type", "General Cargo")
         cargo_type = cols[1].selectbox("", cargo_type_options, index=cargo_type_options.index(current_cargo_type) if current_cargo_type in cargo_type_options else 0, key=f"type_{product_key_version}_{i}", label_visibility="collapsed")
         dim_step = 1 if cargo_type == "Lumber Bundle" else 10
-        l = cols[2].number_input("", value=prod["l"], step=dim_step, key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
-        w = cols[3].number_input("", value=prod["w"], step=dim_step, key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
-        h = cols[4].number_input("", value=prod["h"], step=dim_step, key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
-        wt = cols[5].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
-        qty = cols[6].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
+        l = cols[2].number_input("", value=float(prod["l"]), step=float(dim_step), key=f"l_{product_key_version}_{i}", label_visibility="collapsed")
+        w = cols[3].number_input("", value=float(prod["w"]), step=float(dim_step), key=f"w_{product_key_version}_{i}", label_visibility="collapsed")
+        h = cols[4].number_input("", value=float(prod["h"]), step=float(dim_step), key=f"h_{product_key_version}_{i}", label_visibility="collapsed")
+        wt = cols[5].number_input("", value=float(prod["wt"]), step=1.0, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
+        qty = cols[6].number_input("", value=int(prod["qty"]), step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
         color = cols[7].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
         order_text = cols[8].text_input(
             "",
@@ -574,6 +575,7 @@ if st.session_state.current_tab == "PRODUCTS":
             "qty": qty,
             "color": color,
             "cargo_type": cargo_type,
+            "shape": prod.get("shape", "box"),
             "loading_order": loading_order,
             "tilt_to_length": prod.get("tilt_to_length", False),
             "tilt_to_width": prod.get("tilt_to_width", False),

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from math import pi
 from typing import Dict, List, Optional, Tuple
 
 
@@ -19,9 +20,13 @@ class CargoItem:
     max_stack_mass_kg: Optional[float] = None
     max_stack_height_mm: Optional[float] = None
     disable_stacking: bool = False
+    shape: str = "box"
 
     @property
     def volume_mm3(self) -> float:
+        if self.shape == "cylinder":
+            diameter = min(self.width_mm, self.height_mm)
+            return pi * (diameter / 2) ** 2 * self.length_mm
         return self.length_mm * self.width_mm * self.height_mm
 
 
