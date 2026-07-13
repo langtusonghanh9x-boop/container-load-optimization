@@ -26,8 +26,10 @@ if not ENGINE_DIR.exists() and all((APP_DIR / filename).exists() for filename in
     sys.modules["container_optimizer"] = package
 
 import io
+import zipfile
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 import pandas as pd
 import streamlit as st
 import json
@@ -63,9 +65,9 @@ if 'current_tab' not in st.session_state:
 # 2. Initialize default product list
 if 'product_list' not in st.session_state:
     st.session_state.product_list = [
-        {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
-        {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-        {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
+        {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+        {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+        {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
     ]
 # Force product row widgets to refresh when imported data changes
 if 'product_list_version' not in st.session_state:
@@ -94,6 +96,8 @@ if 'selected_container_quantity' not in st.session_state:
     st.session_state.selected_container_quantity = 1
 if 'calculation_requested' not in st.session_state:
     st.session_state.calculation_requested = False
+if 'recalculate_loading' not in st.session_state:
+    st.session_state.recalculate_loading = False
 if 'load_direction' not in st.session_state:
     st.session_state.load_direction = "inside_out"
 if 'heavy_priority' not in st.session_state:
@@ -188,6 +192,94 @@ def export_plotly_png(fig):
         return None
 
 
+def safe_download_name(value):
+    """Create a portable filename stem from a container or truck name."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "loading_result"
+
+
+def build_3d_html(containers, title):
+    """Create one self-contained interactive HTML file for one or more vehicles."""
+    sections = []
+    for index, packed_container in enumerate(containers):
+        figure = build_container_figure(packed_container)
+        graph_html = figure.to_html(full_html=False, include_plotlyjs=index == 0)
+        sections.append(
+            f"<section><h2>{packed_container.spec.name} {index + 1}</h2>{graph_html}</section>"
+        )
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title>"
+        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#172033;}"
+        "section{margin:0 0 32px;}h1{margin-bottom:28px;}h2{font-size:18px;}</style>"
+        f"</head><body><h1>{title}</h1>{''.join(sections)}</body></html>"
+    ).encode("utf-8")
+
+
+def build_loading_pdf(containers, title, notes):
+    """Create a concise PDF report, with a 3D preview when image export is available."""
+    pdf_buffer = io.BytesIO()
+    report = canvas.Canvas(pdf_buffer, pagesize=letter)
+    page_width, page_height = letter
+    for index, packed_container in enumerate(containers, start=1):
+        report.setTitle(title)
+        report.setFont("Helvetica-Bold", 16)
+        report.drawString(42, page_height - 48, title)
+        report.setFont("Helvetica-Bold", 13)
+        report.drawString(42, page_height - 76, f"{index}. {packed_container.spec.name}")
+        report.setFont("Helvetica", 10)
+        report.drawString(42, page_height - 94, f"Packages: {packed_container.package_count}")
+        report.drawString(42, page_height - 109, f"Volume used: {packed_container.cargo_volume_m3:.3f} m3 ({packed_container.volume_pct:.1f}%)")
+        report.drawString(42, page_height - 124, f"Weight used: {packed_container.cargo_weight_kg:.1f} kg ({packed_container.weight_pct:.1f}%)")
+
+        png_data = export_plotly_png(build_container_figure(packed_container))
+        if png_data is not None:
+            report.drawImage(
+                ImageReader(io.BytesIO(png_data)), 42, 360,
+                width=528, height=200, preserveAspectRatio=True, anchor='c', mask='auto'
+            )
+        else:
+            report.setFont("Helvetica-Oblique", 10)
+            report.drawString(42, 540, "Interactive 3D model is included in the accompanying HTML file.")
+
+        table_y = 335
+        report.setFont("Helvetica-Bold", 10)
+        report.drawString(42, table_y, "Cargo summary")
+        report.setFont("Helvetica-Bold", 8)
+        report.drawString(42, table_y - 14, "Name")
+        report.drawRightString(330, table_y - 14, "Packages")
+        report.drawRightString(445, table_y - 14, "Volume (m3)")
+        report.drawRightString(570, table_y - 14, "Weight (kg)")
+        row_y = table_y - 29
+        report.setFont("Helvetica", 8)
+        for row in summarize_container(packed_container)[:8]:
+            report.drawString(42, row_y, str(row["Name"])[:42])
+            report.drawRightString(330, row_y, str(row["Packages"]))
+            report.drawRightString(445, row_y, f"{row['Volume (m3)']:.3f}")
+            report.drawRightString(570, row_y, f"{row['Weight (kg)']:.1f}")
+            row_y -= 14
+
+        report.setFont("Helvetica-Bold", 10)
+        report.drawString(42, row_y - 6, "Plan notes")
+        report.setFont("Helvetica", 9)
+        text = report.beginText(42, row_y - 21)
+        for note in notes or ["No loading-plan notes."]:
+            for line in str(note).splitlines() or [""]:
+                text.textLine(line)
+        report.drawText(text)
+        report.showPage()
+    report.save()
+    return pdf_buffer.getvalue()
+
+
+def build_download_bundle(containers, title, filename_stem, notes):
+    """Bundle one 3D HTML model and one matching PDF into a ZIP download."""
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr(f"{filename_stem}_3d.html", build_3d_html(containers, title))
+        bundle.writestr(f"{filename_stem}.pdf", build_loading_pdf(containers, title, notes))
+    return archive.getvalue()
+
+
 CARGO_TYPE_OPTIONS = ["Box", "Big Bags", "Sacks", "Barrels", "Roll", "Pipes", "Bulk"]
 
 
@@ -210,15 +302,15 @@ def show_add_product_dialog():
 
     if cargo_type in ("Barrels", "Roll", "Pipes"):
         dimension_cols = st.columns(3)
-        diameter = dimension_cols[0].number_input("Diameter (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_diameter")
-        cylinder_height = dimension_cols[1].number_input("Height (mm)", min_value=1.0, value=100.0, step=10.0, key="new_product_cylinder_height")
+        diameter = dimension_cols[0].number_input("Diameter (mm)", min_value=0.0, value=0.0, step=10.0, key="new_product_diameter")
+        cylinder_height = dimension_cols[1].number_input("Height (mm)", min_value=0.0, value=0.0, step=10.0, key="new_product_cylinder_height")
         new_length, new_width, new_height = cylinder_height, diameter, diameter
     else:
         dimension_cols = st.columns(3)
-        new_length = dimension_cols[0].number_input("Length (mm)", min_value=1.0, value=500.0, step=10.0, key="new_product_length")
-        new_width = dimension_cols[1].number_input("Width (mm)", min_value=1.0, value=400.0, step=10.0, key="new_product_width")
-        new_height = dimension_cols[2].number_input("Height (mm)", min_value=1.0, value=300.0, step=10.0, key="new_product_height")
-    new_weight = st.number_input("Weight (kg)", min_value=0.0, value=10.0, step=1.0, key="new_product_weight")
+        new_length = dimension_cols[0].number_input("Length (mm)", min_value=0.0, value=0.0, step=10.0, key="new_product_length")
+        new_width = dimension_cols[1].number_input("Width (mm)", min_value=0.0, value=0.0, step=10.0, key="new_product_width")
+        new_height = dimension_cols[2].number_input("Height (mm)", min_value=0.0, value=0.0, step=10.0, key="new_product_height")
+    new_weight = st.number_input("Weight (kg)", min_value=0.0, value=0.0, step=1.0, key="new_product_weight")
 
     settings_cols = st.columns(2)
     with settings_cols[0]:
@@ -627,13 +719,14 @@ if st.session_state.current_tab == "PRODUCTS":
         if st.button("Reset All"):
             # Reset product list to defaults
             st.session_state.product_list = [
-                {"name": "Boxes 1", "l": 500, "w": 400, "h": 300, "wt": 10, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
-                {"name": "Sacks", "l": 1000, "w": 450, "h": 300, "wt": 45, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-                {"name": "Big bags", "l": 1000, "w": 1000, "h": 1000, "wt": 900, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"},
+                {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+                {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+                {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"},
             ]
             st.session_state.product_list_version += 1
             # Reset all calculation related state
             st.session_state.calculation_requested = False
+            st.session_state.recalculate_loading = False
             st.session_state.selected_container_quantity = 1
             st.session_state.loading_plans = {}
             st.session_state.variant_idx = 0
@@ -889,6 +982,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     with col_nav2:
         if st.button("Calculate Loading", type="primary"):
             st.session_state.calculation_requested = True
+            st.session_state.recalculate_loading = True
             st.session_state.current_tab = "STUFFING RESULT"
             st.rerun()
 
@@ -920,6 +1014,12 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 selected_strategies = [st.session_state.placement_strategy]
             # Determine containers to compute (list)
             containers_to_compute = st.session_state.get('selected_containers', [st.session_state.selected_container])
+            if (
+                'loading_plans' in st.session_state
+                and not st.session_state.recalculate_loading
+            ):
+                selected_strategies = st.session_state.loading_plans.get('strategies', selected_strategies)
+                containers_to_compute = st.session_state.loading_plans.get('containers', containers_to_compute)
             calculation_input = {
                 "products": st.session_state.product_list,
                 "containers": containers_to_compute,
@@ -935,8 +1035,9 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             calculation_signature = hashlib.sha256(
                 json.dumps(calculation_input, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
-            # Recalculate whenever any input changes; identical requests are served from cache.
-            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('signature') != calculation_signature):
+            # Keep the last calculated result while moving between screens. A new
+            # calculation only starts after the user presses Calculate Loading.
+            if ('loading_plans' not in st.session_state) or st.session_state.recalculate_loading:
                 st.session_state.loading_plans = {
                     'strategies': selected_strategies,
                     'containers': containers_to_compute,
@@ -965,6 +1066,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                             plan = None
                         # Store with composite key
                         st.session_state.loading_plans[f"{cont}|{strat}"] = plan
+                st.session_state.recalculate_loading = False
             # Initialize variant navigation index
             if "variant_idx" not in st.session_state or st.session_state.variant_idx >= len(selected_strategies):
                 st.session_state.variant_idx = 0
@@ -974,60 +1076,25 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             selected_variant = selected_strategies[st.session_state.variant_idx]
             # Determine which containers are available (from stored state)
             containers_list = st.session_state.loading_plans.get('containers', [st.session_state.selected_container])
-        # Global notes for PDF (applies to all pages)
-        if 'pdf_notes' not in st.session_state:
-            st.session_state.pdf_notes = ""
-        pdf_notes = st.text_area("Global notes for PDF (applies to all pages)", value=st.session_state.pdf_notes, key="global_pdf_notes")
-        # Button to generate PDF
-        if st.button("Download PDF (includes 3D images & notes)"):
-            # Create PDF in memory
-            pdf_buffer = io.BytesIO()
-            c = canvas.Canvas(pdf_buffer, pagesize=letter)
-            width, height = letter
-            # Iterate containers
-            # Retrieve the correct loading plan
-            selected_container_view = containers_list[0]
-            plan_key = f"{selected_container_view}|{selected_variant}"
-            loading_plan = st.session_state.loading_plans.get(plan_key)
-            if loading_plan is None:
-                raise ValueError("Loading plan not found for the selected configuration.")
-
-            for idx, container in enumerate(loading_plan.containers, start=1):
-                # Generate PNG image for container
-                fig = build_container_figure(container)
-                png_data = export_plotly_png(fig)
-                # Add image to PDF when the server supports Plotly image export.
-                if png_data is not None:
-                    img_buf = io.BytesIO(png_data)
-                    c.drawImage(ImageReader(img_buf), 50, 250, width=500, preserveAspectRatio=True, mask='auto')
-                else:
-                    c.setFont("Helvetica-Oblique", 10)
-                    c.drawString(50, 500, "3D image unavailable on this server; use the interactive model in the app.")
-                # Add container title
-                c.setFont("Helvetica-Bold", 14)
-                c.drawString(50, 750, f"Container {idx}: {container.spec.name}")
-                # Plan notes apply to every container page.
-                notes_list = [*loading_plan.suggestions, *loading_plan.warnings]
-                notes_text = "\n".join(notes_list) if notes_list else "No loading-plan notes."
-                full_notes = pdf_notes + "\n\n" + notes_text
-                c.setFont("Helvetica", 10)
-                text_obj = c.beginText(50, 200)
-                for line in full_notes.split('\n'):
-                    text_obj.textLine(line)
-                c.drawText(text_obj)
-                c.showPage()
-            c.save()
-            pdf_buffer.seek(0)
-            st.download_button(
-                label="Download PDF",
-                data=pdf_buffer,
-                file_name="loading_results.pdf",
-                mime="application/pdf"
-            )
         # Composite key to retrieve the correct loading plan
         selected_container_view = containers_list[0]
         plan_key = f"{selected_container_view}|{selected_variant}"
         loading_plan = st.session_state.loading_plans.get(plan_key)
+        if loading_plan is None:
+            raise ValueError("Loading plan not found for the selected configuration.")
+
+        plan_notes = [*loading_plan.suggestions, *loading_plan.warnings]
+        st.download_button(
+            label="Download total",
+            data=build_download_bundle(
+                loading_plan.containers,
+                "Total Loading Result",
+                "total_loading_result",
+                plan_notes,
+            ),
+            file_name="total_loading_result.zip",
+            mime="application/zip",
+        )
     except Exception as exc:
         st.warning("Could not complete the optimization with the current data.")
         st.info("Check cargo dimensions, quantities, and weights. You can also reduce the lot size or try a larger container.")
@@ -1043,6 +1110,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         with action_cols[1]:
             if st.button("Reset All", use_container_width=True):
                 st.session_state.calculation_requested = False
+                st.session_state.recalculate_loading = False
+                st.session_state.loading_plans = {}
                 calculate_loading_cached.clear()
                 st.session_state.current_tab = "PRODUCTS"
                 st.rerun()
@@ -1085,26 +1154,16 @@ elif st.session_state.current_tab == "STUFFING RESULT":
         with st.expander(title, expanded=index == 1):
             fig = build_container_figure(container)
             st.plotly_chart(fig, use_container_width=True)
-            # Download 3D image as PNG
-            import io
-            png_data = export_plotly_png(fig)
-            if png_data is not None:
-                st.download_button(
-                    label="Download 3D image",
-                    data=png_data,
-                    file_name=f"{selected_container_view}_container_{index}.png",
-                    mime="image/png",
-                )
-            else:
-                st.caption("PNG export is unavailable on this server. The interactive 3D model remains available.")
-            # Suggestions and warnings belong to the overall loading plan.
-            notes = [*loading_plan.suggestions, *loading_plan.warnings]
-            notes_text = "\n".join(notes) if notes else "No loading-plan notes."
             st.download_button(
-                label="Download notes",
-                data=notes_text.encode("utf-8"),
-                file_name=f"{selected_container_view}_container_{index}_notes.txt",
-                mime="text/plain",
+                label="Download",
+                data=build_download_bundle(
+                    [container],
+                    f"Loading Result - {container.spec.name} {index}",
+                    f"{safe_download_name(container.spec.name)}_{index}",
+                    plan_notes,
+                ),
+                file_name=f"{safe_download_name(container.spec.name)}_{index}_loading_result.zip",
+                mime="application/zip",
             )
             rows = summarize_container(container)
             render_color_summary_table(rows)
@@ -1153,6 +1212,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
     with action_cols[2]:
         if st.button("Reset All", use_container_width=True):
             st.session_state.calculation_requested = False
+            st.session_state.recalculate_loading = False
+            st.session_state.loading_plans = {}
             calculate_loading_cached.clear()
             st.session_state.current_tab = "PRODUCTS"
             st.rerun()
