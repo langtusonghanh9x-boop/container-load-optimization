@@ -50,7 +50,7 @@ def _allowed_rotations(cargo):
     return rotations
 
 
-def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
+def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension, config):
     base_z = float(pivot[2])
     top_z = base_z + float(dimension[2])
 
@@ -61,6 +61,7 @@ def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
     if cargo.max_layers is not None and base_z + 1e-6 >= float(dimension[2]) * cargo.max_layers:
         return False
 
+    support_area = 0.0
     for packed_item in bin_obj.items:
         packed_dimension = packed_item.get_dimension()
         packed_top = float(packed_item.position[2]) + float(packed_dimension[2])
@@ -74,15 +75,22 @@ def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
         )
         if not overlaps_base:
             continue
+        overlap_x = max(0.0, min(float(pivot[0]) + float(dimension[0]), float(packed_item.position[0]) + float(packed_dimension[0])) - max(float(pivot[0]), float(packed_item.position[0])))
+        overlap_y = max(0.0, min(float(pivot[1]) + float(dimension[1]), float(packed_item.position[1]) + float(packed_dimension[1])) - max(float(pivot[1]), float(packed_item.position[1])))
+        support_area += overlap_x * overlap_y
         support = getattr(packed_item, "cargo", None)
         if support is not None and support.disable_stacking:
             return False
         if support is not None and support.max_stack_mass_kg is not None and float(item.weight) > support.max_stack_mass_kg:
             return False
+    if base_z > 0:
+        base_area = max(float(dimension[0]) * float(dimension[1]), 1.0)
+        if support_area / base_area < float(getattr(config, "minimum_support_ratio", 0.0)):
+            return False
     return True
 
 
-def _put_item_with_constraints(bin_obj, item, cargo, pivot):
+def _put_item_with_constraints(bin_obj, item, cargo, pivot, config):
     valid_position = item.position
     item.position = pivot
     for rotation in _allowed_rotations(cargo):
@@ -99,7 +107,7 @@ def _put_item_with_constraints(bin_obj, item, cargo, pivot):
         if bin_obj.get_total_weight() + item.weight > bin_obj.max_weight:
             item.position = valid_position
             return False
-        if not _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
+        if not _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension, config):
             continue
         item.cargo = cargo
         bin_obj.items.append(item)
@@ -108,9 +116,9 @@ def _put_item_with_constraints(bin_obj, item, cargo, pivot):
     return False
 
 
-def _pack_to_bin(bin_obj, item, cargo, axis_order):
+def _pack_to_bin(bin_obj, item, cargo, axis_order, config):
     if not bin_obj.items:
-        return _put_item_with_constraints(bin_obj, item, cargo, START_POSITION)
+        return _put_item_with_constraints(bin_obj, item, cargo, START_POSITION, config)
 
     for axis in axis_order:
         for packed_item in list(bin_obj.items):
@@ -133,7 +141,7 @@ def _pack_to_bin(bin_obj, item, cargo, axis_order):
                     packed_item.position[1],
                     packed_item.position[2] + depth,
                 ]
-            if _put_item_with_constraints(bin_obj, item, cargo, pivot):
+            if _put_item_with_constraints(bin_obj, item, cargo, pivot, config):
                 return True
     return False
 
@@ -243,7 +251,7 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
 
     axis_order = _axis_order(config)
     for py_item in py_items:
-        if not _pack_to_bin(active_bin, py_item, cargo_by_id[py_item.name], axis_order):
+        if not _pack_to_bin(active_bin, py_item, cargo_by_id[py_item.name], axis_order, config):
             active_bin.unfitted_items.append(py_item)
 
     packed = []

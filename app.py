@@ -180,6 +180,14 @@ def make_loading_config(**kwargs):
     return LoadingConfig(**kwargs)
 
 
+def export_plotly_png(fig):
+    """Return a PNG when Kaleido/Chrome is available; keep the app usable when it is not."""
+    try:
+        return fig.to_image(format="png")
+    except Exception:
+        return None
+
+
 CARGO_TYPE_OPTIONS = ["Box", "Big Bags", "Sacks", "Barrels", "Roll", "Pipes", "Bulk"]
 
 
@@ -985,11 +993,14 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             for idx, container in enumerate(loading_plan.containers, start=1):
                 # Generate PNG image for container
                 fig = build_container_figure(container)
-                img_buf = io.BytesIO()
-                fig.write_image(img_buf, format="png")
-                img_buf.seek(0)
-                # Add image to PDF
-                c.drawImage(ImageReader(img_buf), 50, 250, width=500, preserveAspectRatio=True, mask='auto')
+                png_data = export_plotly_png(fig)
+                # Add image to PDF when the server supports Plotly image export.
+                if png_data is not None:
+                    img_buf = io.BytesIO(png_data)
+                    c.drawImage(ImageReader(img_buf), 50, 250, width=500, preserveAspectRatio=True, mask='auto')
+                else:
+                    c.setFont("Helvetica-Oblique", 10)
+                    c.drawString(50, 500, "3D image unavailable on this server; use the interactive model in the app.")
                 # Add container title
                 c.setFont("Helvetica-Bold", 14)
                 c.drawString(50, 750, f"Container {idx}: {container.spec.name}")
@@ -1076,15 +1087,16 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             st.plotly_chart(fig, use_container_width=True)
             # Download 3D image as PNG
             import io
-            img_buffer = io.BytesIO()
-            fig.write_image(img_buffer, format="png")
-            img_buffer.seek(0)
-            st.download_button(
-                label="Download 3D image",
-                data=img_buffer,
-                file_name=f"{selected_container_view}_container_{index}.png",
-                mime="image/png",
-            )
+            png_data = export_plotly_png(fig)
+            if png_data is not None:
+                st.download_button(
+                    label="Download 3D image",
+                    data=png_data,
+                    file_name=f"{selected_container_view}_container_{index}.png",
+                    mime="image/png",
+                )
+            else:
+                st.caption("PNG export is unavailable on this server. The interactive 3D model remains available.")
             # Compile notes (suggestions and warnings)
             notes = []
             notes.extend(container.suggestions)
