@@ -1,7 +1,7 @@
 from itertools import permutations
 
 from py3dbp import Bin, Item, Packer
-from py3dbp.main import Axis, START_POSITION
+from py3dbp.main import Axis, START_POSITION, RotationType, intersect
 
 from .models import CargoItem, ContainerSpec, LoadingConfig, PackedContainer, PackedItem
 
@@ -38,9 +38,79 @@ def sort_items_for_loading(items, config=None):
     return sorted(items, key=base_key)
 
 
-def _pack_to_bin(bin_obj, item, axis_order):
+def _allowed_rotations(cargo):
+    if not (cargo.tilt_to_length or cargo.tilt_to_width):
+        return RotationType.ALL
+
+    rotations = [RotationType.RT_WHD]
+    if cargo.tilt_to_length:
+        rotations.append(RotationType.RT_DHW)
+    if cargo.tilt_to_width:
+        rotations.append(RotationType.RT_WDH)
+    return rotations
+
+
+def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
+    base_z = float(pivot[2])
+    top_z = base_z + float(dimension[2])
+
+    if cargo.disable_stacking and base_z > 0:
+        return False
+    if cargo.max_stack_height_mm is not None and top_z > cargo.max_stack_height_mm:
+        return False
+    if cargo.max_layers is not None and base_z + 1e-6 >= float(dimension[2]) * cargo.max_layers:
+        return False
+
+    for packed_item in bin_obj.items:
+        packed_dimension = packed_item.get_dimension()
+        packed_top = float(packed_item.position[2]) + float(packed_dimension[2])
+        if abs(packed_top - base_z) > 1e-6:
+            continue
+        overlaps_base = (
+            float(pivot[0]) < float(packed_item.position[0]) + float(packed_dimension[0])
+            and float(pivot[0]) + float(dimension[0]) > float(packed_item.position[0])
+            and float(pivot[1]) < float(packed_item.position[1]) + float(packed_dimension[1])
+            and float(pivot[1]) + float(dimension[1]) > float(packed_item.position[1])
+        )
+        if not overlaps_base:
+            continue
+        support = getattr(packed_item, "cargo", None)
+        if support is not None and support.disable_stacking:
+            return False
+        if support is not None and support.max_stack_mass_kg is not None and float(item.weight) > support.max_stack_mass_kg:
+            return False
+    return True
+
+
+def _put_item_with_constraints(bin_obj, item, cargo, pivot):
+    valid_position = item.position
+    item.position = pivot
+    for rotation in _allowed_rotations(cargo):
+        item.rotation_type = rotation
+        dimension = item.get_dimension()
+        if (
+            bin_obj.width < pivot[0] + dimension[0]
+            or bin_obj.height < pivot[1] + dimension[1]
+            or bin_obj.depth < pivot[2] + dimension[2]
+        ):
+            continue
+        if any(intersect(packed_item, item) for packed_item in bin_obj.items):
+            continue
+        if bin_obj.get_total_weight() + item.weight > bin_obj.max_weight:
+            item.position = valid_position
+            return False
+        if not _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension):
+            continue
+        item.cargo = cargo
+        bin_obj.items.append(item)
+        return True
+    item.position = valid_position
+    return False
+
+
+def _pack_to_bin(bin_obj, item, cargo, axis_order):
     if not bin_obj.items:
-        return bin_obj.put_item(item, START_POSITION)
+        return _put_item_with_constraints(bin_obj, item, cargo, START_POSITION)
 
     for axis in axis_order:
         for packed_item in list(bin_obj.items):
@@ -63,7 +133,7 @@ def _pack_to_bin(bin_obj, item, axis_order):
                     packed_item.position[1],
                     packed_item.position[2] + depth,
                 ]
-            if bin_obj.put_item(item, pivot):
+            if _put_item_with_constraints(bin_obj, item, cargo, pivot):
                 return True
     return False
 
@@ -173,7 +243,7 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
 
     axis_order = _axis_order(config)
     for py_item in py_items:
-        if not _pack_to_bin(active_bin, py_item, axis_order):
+        if not _pack_to_bin(active_bin, py_item, cargo_by_id[py_item.name], axis_order):
             active_bin.unfitted_items.append(py_item)
 
     packed = []

@@ -26,5 +26,11 @@ def product_rows_to_cargo_items(products):
                 color=product.get("color", "#7f8c8d"),
                 cargo_type=cargo_type,
                 loading_order=product.get("loading_order"),
+                tilt_to_length=bool(product.get("tilt_to_length", False)),
+                tilt_to_width=bool(product.get("tilt_to_width", False)),
+                max_layers=product.get("max_layers") or None,
+                max_stack_mass_kg=product.get("max_stack_mass_kg") or None,
+                max_stack_height_mm=product.get("max_stack_height_mm") or None,
+                disable_stacking=bool(product.get("disable_stacking", False)),
             ))
     return items

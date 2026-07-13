@@ -12,6 +12,13 @@ class CargoItem:
     weight_kg: float
     color: str = "#7f8c8d"
     cargo_type: str = "General Cargo"
+    loading_order: Optional[int] = None
+    tilt_to_length: bool = False
+    tilt_to_width: bool = False
+    max_layers: Optional[int] = None
+    max_stack_mass_kg: Optional[float] = None
+    max_stack_height_mm: Optional[float] = None
+    disable_stacking: bool = False
 
     @property
     def volume_mm3(self) -> float:
