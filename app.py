@@ -65,9 +65,9 @@ if 'current_tab' not in st.session_state:
 # 2. Initialize default product list
 if 'product_list' not in st.session_state:
     st.session_state.product_list = [
-        {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
-        {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-        {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
+        {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#2ecc71", "cargo_type": "General Cargo"},
+        {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#9b59b6", "cargo_type": "General Cargo"},
+        {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#3498db", "cargo_type": "General Cargo"}
     ]
 # Force product row widgets to refresh when imported data changes
 if 'product_list_version' not in st.session_state:
@@ -317,7 +317,7 @@ def show_add_product_dialog():
     product_cols = st.columns(3)
     new_name = product_cols[0].text_input("Product Name", value="New Product", key="new_product_name")
     new_color = product_cols[1].color_picker("Color", value="#8e43d6", key="new_product_color")
-    new_qty = product_cols[2].number_input("Quantity", min_value=1, value=1, step=1, key="new_product_qty")
+    new_qty = product_cols[2].number_input("Quantity", min_value=0, value=0, step=1, key="new_product_qty")
 
     if cargo_type in ("Barrels", "Roll", "Pipes"):
         dimension_cols = st.columns(3)
@@ -421,7 +421,8 @@ if st.session_state.current_tab == "PRODUCTS":
         "Length": ["LENGTH (MM)", "LENGTH", "LEN", "L (MM)"],
         "Width": ["WIDTH (MM)", "WIDTH", "WID", "W (MM)"],
         "Height": ["HEIGHT (MM)", "HEIGHT", "HEI", "H (MM)"],
-        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"]
+        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"],
+        "Order": ["ORDER (INSIDE → OUT)", "ORDER (INSIDE OUT)", "ORDER", "LOADING ORDER", "LOAD ORDER"]
     }
 
     def find_column(columns, possible_names):
@@ -525,7 +526,7 @@ if st.session_state.current_tab == "PRODUCTS":
             if key.startswith(prefixes):
                 del st.session_state[key]
 
-    IMPORT_CODE_VERSION = "product-import-v10"
+    IMPORT_CODE_VERSION = "product-import-v11"
 
     if uploaded_file is not None:
         file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
@@ -543,6 +544,7 @@ if st.session_state.current_tab == "PRODUCTS":
                 col_hei = find_column(df.columns, COLUMN_ALIASES["Height"])
                 col_wt = find_column(df.columns, COLUMN_ALIASES["Weight"])
                 col_qty = find_column(df.columns, COLUMN_ALIASES["Quantity"])
+                col_order = find_column(df.columns, COLUMN_ALIASES["Order"])
 
                 def average_text_length(column):
                     values = []
@@ -611,6 +613,16 @@ if st.session_state.current_tab == "PRODUCTS":
                     number = float(match.group(0))
                     return int(number) if number > 0 else default
 
+                def parse_loading_order(value):
+                    if is_blank(value):
+                        return None
+                    text = str(value).strip().replace(",", "")
+                    match = re.search(r"\d+", text)
+                    if not match:
+                        return None
+                    order = int(match.group(0))
+                    return order if 1 <= order <= 100 else None
+
                 data_columns = [col_desc, col_len, col_wid, col_hei, col_wt, col_qty]
 
                 for idx, row in df.iterrows():
@@ -630,7 +642,8 @@ if st.session_state.current_tab == "PRODUCTS":
                         "wt": parse_number(row[col_wt]),
                         "qty": parse_number(row[col_qty]),
                         "color": colors[len(imported_products) % len(colors)],
-                        "cargo_type": "General Cargo"
+                        "cargo_type": "General Cargo",
+                        "loading_order": parse_loading_order(row[col_order]) if col_order is not None else None,
                     })
                 if not imported_products:
                     st.warning("No valid product rows were found in the uploaded file.")
@@ -731,16 +744,16 @@ if st.session_state.current_tab == "PRODUCTS":
             show_add_product_dialog()
     with add_cols[1]:
         if st.button("Add Lumber Bundle"):
-            st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
+            st.session_state.product_list.append({"name": "Lumber Bundle", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
             st.session_state.product_list_version += 1
             st.rerun()
     with add_cols[2]:
         if st.button("Reset All"):
             # Reset product list to defaults
             st.session_state.product_list = [
-                {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
-                {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
-                {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"},
+                {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#2ecc71", "cargo_type": "General Cargo"},
+                {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#9b59b6", "cargo_type": "General Cargo"},
+                {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#3498db", "cargo_type": "General Cargo"},
             ]
             st.session_state.product_list_version += 1
             # Reset all calculation related state
