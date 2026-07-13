@@ -85,7 +85,6 @@ CONTAINER_DICT = {
     "Truck 8T": {"l": 8000, "w": 2350, "h": 2400, "m": 8000},
     "Truck 10T": {"l": 9500, "w": 2400, "h": 2500, "m": 10000},
     "Truck 15T": {"l": 12000, "w": 2400, "h": 2600, "m": 15000},
-    "Semi Trailer 24T": {"l": 13600, "w": 2450, "h": 2700, "m": 24000},
 }
 
 # Keep the selected container across screens
@@ -659,28 +658,14 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     
     container_options = list(CONTAINER_DICT.keys()) + [c.get("name", f"Custom {i+1}") for i, c in enumerate(st.session_state.custom_containers)]
     selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
-    # Multi-select container types (allow up to 2)
-    selected_containers = st.multiselect(
-        "Select container type(s) (max 2):",
+    # A single selector updates the chosen vehicle/container immediately.
+    selected_container = st.selectbox(
+        "Select truck or container:",
         container_options,
-        default=[st.session_state.selected_container] if st.session_state.selected_container else [],
-        help="You can choose up to two container or truck types for this calculation."
+        index=selected_container_index,
     )
-    if len(selected_containers) > 2:
-        st.warning("Please select at most two containers/trucks.")
-        selected_containers = selected_containers[:2]
-    # Store in session state; use the first selected as the primary for downstream single-value usages
-    st.session_state.selected_containers = selected_containers
-    if selected_containers:
-        st.session_state.selected_container = selected_containers[0]
-    else:
-        st.session_state.selected_container = ""
-    # Preserve original selectbox UI for backward compatibility (hidden)
-    # st.session_state.selected_container = st.selectbox(
-    #    "Select the target container type:",
-    #    container_options,
-    #    index=selected_container_index
-    # )
+    st.session_state.selected_container = selected_container
+    st.session_state.selected_containers = [selected_container]
 
     # Upload custom containers configuration (JSON)
     uploaded_containers_file = st.file_uploader(
@@ -921,11 +906,32 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 "fill_width_before_length": "Width first"
             }
             selected_strategies = st.session_state.get('selected_strategies', [st.session_state.placement_strategy])
+            if not selected_strategies:
+                selected_strategies = [st.session_state.placement_strategy]
             # Determine containers to compute (list)
             containers_to_compute = st.session_state.get('selected_containers', [st.session_state.selected_container])
-            # Initialize or refresh loading plans if strategies or containers changed
-            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('strategies') != selected_strategies) or (st.session_state.loading_plans.get('containers') != containers_to_compute):
-                st.session_state.loading_plans = {'strategies': selected_strategies, 'containers': containers_to_compute}
+            calculation_input = {
+                "products": st.session_state.product_list,
+                "containers": containers_to_compute,
+                "dimensions": custom_dims,
+                "quantity": int(st.session_state.selected_container_quantity),
+                "strategies": selected_strategies,
+                "load_direction": st.session_state.load_direction,
+                "heavy_priority": st.session_state.heavy_priority,
+                "max_additional_containers": int(st.session_state.max_additional_containers),
+                "minimum_support_ratio": float(st.session_state.minimum_support_ratio),
+                "contact_compaction": bool(st.session_state.contact_compaction),
+            }
+            calculation_signature = hashlib.sha256(
+                json.dumps(calculation_input, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            # Recalculate whenever any input changes; identical requests are served from cache.
+            if ('loading_plans' not in st.session_state) or (st.session_state.loading_plans.get('signature') != calculation_signature):
+                st.session_state.loading_plans = {
+                    'strategies': selected_strategies,
+                    'containers': containers_to_compute,
+                    'signature': calculation_signature,
+                }
                 for cont in containers_to_compute:
                     for strat in selected_strategies:
                         config = make_loading_config(
@@ -941,7 +947,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
     st.session_state.product_list,
     cont,
     custom_dims,
-    1 if len(st.session_state.get('selected_containers', [])) > 1 else int(st.session_state.selected_container_quantity),
+    int(st.session_state.selected_container_quantity),
     config
 )
                         except Exception as exc:

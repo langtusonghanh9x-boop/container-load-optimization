@@ -14,7 +14,6 @@ STANDARD_CONTAINERS = {
     "Truck 8T": ContainerSpec("Truck 8T", 8000, 2350, 2400, 8000),
     "Truck 10T": ContainerSpec("Truck 10T", 9500, 2400, 2500, 10000),
     "Truck 15T": ContainerSpec("Truck 15T", 12000, 2400, 2600, 15000),
-    "Semi Trailer 24T": ContainerSpec("Semi Trailer 24T", 13600, 2450, 2700, 24000),
 }
 
 
