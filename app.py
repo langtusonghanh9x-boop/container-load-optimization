@@ -1004,11 +1004,9 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 # Add container title
                 c.setFont("Helvetica-Bold", 14)
                 c.drawString(50, 750, f"Container {idx}: {container.spec.name}")
-                # Add notes (container-specific + global)
-                notes_list = []
-                notes_list.extend(container.suggestions)
-                notes_list.extend(container.warnings)
-                notes_text = "\n".join(notes_list) if notes_list else "No container notes."
+                # Plan notes apply to every container page.
+                notes_list = [*loading_plan.suggestions, *loading_plan.warnings]
+                notes_text = "\n".join(notes_list) if notes_list else "No loading-plan notes."
                 full_notes = pdf_notes + "\n\n" + notes_text
                 c.setFont("Helvetica", 10)
                 text_obj = c.beginText(50, 200)
@@ -1097,11 +1095,9 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 )
             else:
                 st.caption("PNG export is unavailable on this server. The interactive 3D model remains available.")
-            # Compile notes (suggestions and warnings)
-            notes = []
-            notes.extend(container.suggestions)
-            notes.extend(container.warnings)
-            notes_text = "\n".join(notes) if notes else "No notes."
+            # Suggestions and warnings belong to the overall loading plan.
+            notes = [*loading_plan.suggestions, *loading_plan.warnings]
+            notes_text = "\n".join(notes) if notes else "No loading-plan notes."
             st.download_button(
                 label="Download notes",
                 data=notes_text.encode("utf-8"),
