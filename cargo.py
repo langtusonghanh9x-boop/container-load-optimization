@@ -25,6 +25,6 @@ def product_rows_to_cargo_items(products):
                 weight_kg=float(product.get("wt", 0)),
                 color=product.get("color", "#7f8c8d"),
                 cargo_type=cargo_type,
+                loading_order=product.get("loading_order"),
             ))
     return items
-

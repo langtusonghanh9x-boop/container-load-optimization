@@ -15,13 +15,27 @@ def can_fit_item(item: CargoItem, container: ContainerSpec) -> bool:
 
 def sort_items_for_loading(items, config=None):
     config = config or LoadingConfig()
+
     if getattr(config, "heavy_priority", "heavy_bottom") == "heavy_bottom":
+        base_key = lambda item: (-item.weight_kg, -item.volume_mm3, -(item.length_mm * item.width_mm))
+    else:
+        base_key = lambda item: (-item.volume_mm3, -item.weight_kg)
+
+    # A selected order is packed first, from the inside of the container out.
+    # Items without an order keep the existing behavior and are handled afterward.
+    if any(item.loading_order is not None for item in items):
         return sorted(
             items,
-            key=lambda item: (item.weight_kg, item.volume_mm3, item.length_mm * item.width_mm),
-            reverse=True,
+            key=lambda item: (
+                item.loading_order is None,
+                item.loading_order if item.loading_order is not None else float("inf"),
+                *base_key(item),
+            ),
         )
-    return sorted(items, key=lambda item: (item.volume_mm3, item.weight_kg), reverse=True)
+
+    if getattr(config, "heavy_priority", "heavy_bottom") == "heavy_bottom":
+        return sorted(items, key=base_key)
+    return sorted(items, key=base_key)
 
 
 def _pack_to_bin(bin_obj, item, axis_order):

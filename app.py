@@ -320,7 +320,7 @@ if st.session_state.current_tab == "PRODUCTS":
 
         return best_df if best_df is not None else pd.DataFrame()
     def clear_product_input_state():
-        prefixes = ("name_", "type_", "l_", "w_", "h_", "wt_", "qty_", "color_", "del_")
+        prefixes = ("name_", "type_", "l_", "w_", "h_", "wt_", "qty_", "color_", "order_", "del_")
         for key in list(st.session_state.keys()):
             if key.startswith(prefixes):
                 del st.session_state[key]
@@ -447,7 +447,7 @@ if st.session_state.current_tab == "PRODUCTS":
 
     if st.session_state.get("import_success_message"):
         st.success(st.session_state.import_success_message)
-    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
+    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8, col_h9 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.5])
     with col_h1: st.markdown("**Product Name**")
     with col_h_type: st.markdown("**Cargo Type**")
     with col_h2: st.markdown("**Length**")
@@ -456,7 +456,8 @@ if st.session_state.current_tab == "PRODUCTS":
     with col_h5: st.markdown("**Weight (kg)**")
     with col_h6: st.markdown("**Quantity**")
     with col_h7: st.markdown("**Color**")
-    with col_h8: st.markdown("**Del**")
+    with col_h8: st.markdown("**Order (Inside → Out)**")
+    with col_h9: st.markdown("**Del**")
 
     # Update product rows while keeping Streamlit state stable
     temp_list = []
@@ -464,7 +465,7 @@ if st.session_state.current_tab == "PRODUCTS":
     
     product_key_version = st.session_state.product_list_version
     for i, prod in enumerate(st.session_state.product_list):
-        cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.5])
+        cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.5])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
         cargo_type_options = ["General Cargo", "Lumber Bundle"]
         current_cargo_type = prod.get("cargo_type", "General Cargo")
@@ -476,11 +477,22 @@ if st.session_state.current_tab == "PRODUCTS":
         wt = cols[5].number_input("", value=prod["wt"], step=1, key=f"wt_{product_key_version}_{i}", label_visibility="collapsed")
         qty = cols[6].number_input("", value=prod["qty"], step=1, key=f"qty_{product_key_version}_{i}", label_visibility="collapsed")
         color = cols[7].color_picker("", value=prod["color"], key=f"color_{product_key_version}_{i}", label_visibility="collapsed")
+        order_options = [None, *range(1, len(st.session_state.product_list) + 1)]
+        current_order = prod.get("loading_order")
+        order_index = order_options.index(current_order) if current_order in order_options else 0
+        loading_order = cols[8].selectbox(
+            "",
+            order_options,
+            index=order_index,
+            format_func=lambda value: "—" if value is None else str(value),
+            key=f"order_{product_key_version}_{i}",
+            label_visibility="collapsed",
+        )
         
-        if cols[8].button("Delete", key=f"del_{product_key_version}_{i}"):
+        if cols[9].button("Delete", key=f"del_{product_key_version}_{i}"):
             to_delete = i
             
-        temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type})
+        temp_list.append({"name": name, "l": l, "w": w, "h": h, "wt": wt, "qty": qty, "color": color, "cargo_type": cargo_type, "loading_order": loading_order})
 
     if to_delete is not None:
         temp_list.pop(to_delete)
