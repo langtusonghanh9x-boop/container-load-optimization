@@ -76,7 +76,16 @@ CONTAINER_DICT = {
     "20' Standard": {"l": 5898, "w": 2352, "h": 2393, "m": 28000},
     "40' Standard": {"l": 12032, "w": 2352, "h": 2393, "m": 28000},
     "40' High-Cube (40HQ)": {"l": 12032, "w": 2352, "h": 2698, "m": 28000},
-    "45' High-Cube": {"l": 13556, "w": 2352, "h": 2698, "m": 29000}
+    "45' High-Cube": {"l": 13556, "w": 2352, "h": 2698, "m": 29000},
+    "Truck 1.5T": {"l": 3100, "w": 1600, "h": 1700, "m": 1500},
+    "Truck 2T": {"l": 3800, "w": 1800, "h": 1850, "m": 2000},
+    "Truck 2.5T": {"l": 4300, "w": 1900, "h": 1950, "m": 2500},
+    "Truck 3.5T": {"l": 4300, "w": 2000, "h": 2000, "m": 3500},
+    "Truck 5T": {"l": 6200, "w": 2300, "h": 2300, "m": 5000},
+    "Truck 8T": {"l": 8000, "w": 2350, "h": 2400, "m": 8000},
+    "Truck 10T": {"l": 9500, "w": 2400, "h": 2500, "m": 10000},
+    "Truck 15T": {"l": 12000, "w": 2400, "h": 2600, "m": 15000},
+    "Semi Trailer 24T": {"l": 13600, "w": 2450, "h": 2700, "m": 24000},
 }
 
 # Keep the selected container across screens
@@ -675,7 +684,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
 
     # Upload custom containers configuration (JSON)
     uploaded_containers_file = st.file_uploader(
-        "Import Custom Containers (JSON)",
+        "Import custom trucks / containers (JSON)",
         type=["json"],
         label_visibility="collapsed"
     )
@@ -707,7 +716,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         except Exception as e:
             st.warning(f"Failed to import custom containers: {e}")
     
-    # If a custom container is selected, show its editable fields
+    # If a custom truck or container is selected, show its editable fields.
     if st.session_state.selected_container not in CONTAINER_DICT:
         # Find the custom container entry
         custom_idx = next((i for i, c in enumerate(st.session_state.custom_containers) 
@@ -736,11 +745,11 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
                 key=f"edit_m_{custom_idx}"
             )
             # Delete button
-            if edit_cols[5].button("Delete", key=f"del_{custom_idx}"):
+            if edit_cols[5].button("🗑️", key=f"del_{custom_idx}"):
                 st.session_state.custom_containers.pop(custom_idx)
                 with open('custom_containers.json', 'w') as f:
                     json.dump(st.session_state.custom_containers, f, indent=2)
-                st.success("Custom container deleted.")
+                st.success("Custom truck / container deleted.")
                 # Reset selection to first option
                 if st.session_state.custom_containers:
                     st.session_state.selected_container = st.session_state.custom_containers[0]["name"]
@@ -748,33 +757,41 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
                     st.session_state.selected_container = list(CONTAINER_DICT.keys())[0]
                 st.rerun()
             # Save button
-            if st.button("Save Custom Container"):
+            if st.button("Save Truck / Container", type="primary"):
                 st.session_state.custom_containers[custom_idx] = {
                     "name": edit_name,
                     "l": edit_l,
                     "w": edit_w,
                     "h": edit_h,
-                    "m": edit_m
+                    "m": edit_m,
+                    "kind": "Truck / Custom"
                 }
                 with open('custom_containers.json', 'w') as f:
                     json.dump(st.session_state.custom_containers, f, indent=2)
-                st.success("Custom container saved.")
+                st.session_state.selected_container = edit_name
+                st.session_state.selected_containers = [edit_name]
+                calculate_loading_cached.clear()
+                st.success("Custom truck / container saved and added to calculations.")
                 st.rerun()
-    # Button to add a new custom container
-    if st.button("Add Custom Container"):
+    # Add a draft vehicle. It is persisted only after the user clicks Save.
+    if st.button("Add Truck / Custom Vehicle"):
         new_index = len(st.session_state.custom_containers) + 1
+        existing_names = {container.get("name") for container in st.session_state.custom_containers}
+        new_name = f"Custom Truck {new_index}"
+        while new_name in existing_names:
+            new_index += 1
+            new_name = f"Custom Truck {new_index}"
         st.session_state.custom_containers.append({
-            "name": f"Custom {new_index}",
+            "name": new_name,
             "l": 6000,
             "w": 2400,
             "h": 2400,
-            "m": 25000
+            "m": 25000,
+            "kind": "Truck / Custom"
         })
-        # Persist the updated list
-        with open('custom_containers.json', 'w') as f:
-            json.dump(st.session_state.custom_containers, f, indent=2)
-        # Automatically select the new container
-        st.session_state.selected_container = f"Custom {new_index}"
+        # Automatically select the draft so the user can enter dimensions, then save.
+        st.session_state.selected_container = new_name
+        st.session_state.selected_containers = [new_name]
         st.rerun()
 
 
