@@ -4,9 +4,19 @@ from .packing import can_fit_item
 
 class ContainerManager:
     def __init__(self, selected_spec, selected_quantity=1, allow_auto_add=True):
-        self.selected_specs = list(selected_spec) if isinstance(selected_spec, (list, tuple)) else [selected_spec]
+        raw_specs = list(selected_spec) if isinstance(selected_spec, (list, tuple)) else [selected_spec]
+        # Accept both a single specification and nested lists produced by
+        # callers that combine multiple selected vehicles.
+        self.selected_specs = []
+        for spec in raw_specs:
+            if isinstance(spec, (list, tuple)):
+                self.selected_specs.extend(spec)
+            else:
+                self.selected_specs.append(spec)
         if not self.selected_specs:
             raise ValueError("At least one vehicle must be selected.")
+        if not all(hasattr(spec, "name") for spec in self.selected_specs):
+            raise TypeError("Selected vehicles must be container specifications.")
         self.selected_spec = self.selected_specs[0]
         self.selected_quantity = max(int(selected_quantity), 1)
         self.allow_auto_add = allow_auto_add
