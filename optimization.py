@@ -72,11 +72,12 @@ def _incremental_repacking(spec, items, role, packed, remaining, config):
     """
     if packed.volume_pct >= 98.0:
         return packed, remaining
-    repack_config = replace(
-        config,
-        placement_strategy="best_free_space_reduction",
-        beam_width=max(int(getattr(config, "beam_width", 12)), 24),
-    )
+    repack_updates = {"placement_strategy": "best_free_space_reduction"}
+    # Keep cloud deployments compatible with a previously cached/packaged
+    # LoadingConfig that does not yet expose the optional Beam setting.
+    if "beam_width" in getattr(config, "__dataclass_fields__", {}):
+        repack_updates["beam_width"] = max(int(getattr(config, "beam_width", 12)), 24)
+    repack_config = replace(config, **repack_updates)
     repacked, repacked_remaining = pack_container(spec, items, role=role, config=repack_config)
     if _candidate_score(repacked) > _candidate_score(packed):
         return repacked, repacked_remaining
