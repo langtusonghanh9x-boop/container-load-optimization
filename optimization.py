@@ -42,9 +42,12 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     warnings = []
     suggestions = []
     manager = ContainerManager(selected_spec, selected_quantity, allow_auto_add)
-    vehicle_label = "xe tai" if selected_spec.name.startswith("Truck ") else "container"
+    vehicle_label = "xe tai" if "truck" in manager.selected_spec.name.lower() else "container"
 
-    impossible_for_selected = [item for item in items if not can_fit_item(item, selected_spec)]
+    impossible_for_selected = [
+        item for item in items
+        if not any(can_fit_item(item, spec) for spec in manager.initial_specs())
+    ]
     if impossible_for_selected:
         warnings.append(
             f"{len(impossible_for_selected)} kien khong phu hop container da chon do vuot kich thuoc hoac tai trong."

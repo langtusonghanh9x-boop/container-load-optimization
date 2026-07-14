@@ -4,11 +4,16 @@ from .packing import can_fit_item
 
 class ContainerManager:
     def __init__(self, selected_spec, selected_quantity=1, allow_auto_add=True):
-        self.selected_spec = selected_spec
+        self.selected_specs = list(selected_spec) if isinstance(selected_spec, (list, tuple)) else [selected_spec]
+        if not self.selected_specs:
+            raise ValueError("At least one vehicle must be selected.")
+        self.selected_spec = self.selected_specs[0]
         self.selected_quantity = max(int(selected_quantity), 1)
         self.allow_auto_add = allow_auto_add
 
     def initial_specs(self):
+        if len(self.selected_specs) > 1:
+            return self.selected_specs
         return [self.selected_spec for _ in range(self.selected_quantity)]
 
     def candidate_extra_specs(self, items):

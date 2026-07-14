@@ -65,9 +65,9 @@ if 'current_tab' not in st.session_state:
 # 2. Initialize default product list
 if 'product_list' not in st.session_state:
     st.session_state.product_list = [
-        {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#2ecc71", "cargo_type": "General Cargo"},
-        {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#9b59b6", "cargo_type": "General Cargo"},
-        {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#3498db", "cargo_type": "General Cargo"}
+        {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+        {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+        {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"}
     ]
 # Force product row widgets to refresh when imported data changes
 if 'product_list_version' not in st.session_state:
@@ -130,13 +130,16 @@ if 'minimum_support_ratio' not in st.session_state:
 
 
 @st.cache_data(show_spinner=False)
-def calculate_loading_cached(products, selected_container, custom_dims, selected_quantity, loading_config):
+def calculate_loading_cached(products, selected_containers, custom_dimensions, selected_quantity, loading_config):
     items = product_rows_to_cargo_items(products)
-    spec = get_container_spec(selected_container, custom_dims)
+    specs = [
+        get_container_spec(name, custom_dimensions.get(name))
+        for name in selected_containers
+    ]
     try:
         return optimize_loading(
             items,
-            spec,
+            specs,
             selected_quantity=selected_quantity,
             allow_auto_add=True,
             config=loading_config,
@@ -144,7 +147,7 @@ def calculate_loading_cached(products, selected_container, custom_dims, selected
     except TypeError as exc:
         if "config" not in str(exc):
             raise
-        return optimize_loading(items, spec, selected_quantity=selected_quantity, allow_auto_add=True)
+        return optimize_loading(items, specs, selected_quantity=selected_quantity, allow_auto_add=True)
 
 
 def render_color_summary_table(rows):
@@ -201,7 +204,7 @@ def color_name_bilingual(hex_color):
         rgb = tuple(int(clean[index:index + 2], 16) for index in (0, 2, 4))
     except ValueError:
         return "Color (Màu)"
-    return min(named_colors, key=lambda name: sum((rgb[i] - value[i]) ** 2 for i, value in enumerate(named_colors[name])))
+    return min(named_colors, key=lambda name: sum((rgb[i] - value) ** 2 for i, value in enumerate(named_colors[name])))
 
 
 def make_loading_config(**kwargs):
@@ -317,7 +320,7 @@ def show_add_product_dialog():
     product_cols = st.columns(3)
     new_name = product_cols[0].text_input("Product Name", value="New Product", key="new_product_name")
     new_color = product_cols[1].color_picker("Color", value="#8e43d6", key="new_product_color")
-    new_qty = product_cols[2].number_input("Quantity", min_value=0, value=0, step=1, key="new_product_qty")
+    new_qty = product_cols[2].number_input("Quantity", min_value=1, value=1, step=1, key="new_product_qty")
 
     if cargo_type in ("Barrels", "Roll", "Pipes"):
         dimension_cols = st.columns(3)
@@ -421,8 +424,7 @@ if st.session_state.current_tab == "PRODUCTS":
         "Length": ["LENGTH (MM)", "LENGTH", "LEN", "L (MM)"],
         "Width": ["WIDTH (MM)", "WIDTH", "WID", "W (MM)"],
         "Height": ["HEIGHT (MM)", "HEIGHT", "HEI", "H (MM)"],
-        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"],
-        "Order": ["ORDER (INSIDE → OUT)", "ORDER (INSIDE OUT)", "ORDER", "LOADING ORDER", "LOAD ORDER"]
+        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"]
     }
 
     def find_column(columns, possible_names):
@@ -526,7 +528,7 @@ if st.session_state.current_tab == "PRODUCTS":
             if key.startswith(prefixes):
                 del st.session_state[key]
 
-    IMPORT_CODE_VERSION = "product-import-v11"
+    IMPORT_CODE_VERSION = "product-import-v10"
 
     if uploaded_file is not None:
         file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
@@ -544,7 +546,6 @@ if st.session_state.current_tab == "PRODUCTS":
                 col_hei = find_column(df.columns, COLUMN_ALIASES["Height"])
                 col_wt = find_column(df.columns, COLUMN_ALIASES["Weight"])
                 col_qty = find_column(df.columns, COLUMN_ALIASES["Quantity"])
-                col_order = find_column(df.columns, COLUMN_ALIASES["Order"])
 
                 def average_text_length(column):
                     values = []
@@ -613,16 +614,6 @@ if st.session_state.current_tab == "PRODUCTS":
                     number = float(match.group(0))
                     return int(number) if number > 0 else default
 
-                def parse_loading_order(value):
-                    if is_blank(value):
-                        return None
-                    text = str(value).strip().replace(",", "")
-                    match = re.search(r"\d+", text)
-                    if not match:
-                        return None
-                    order = int(match.group(0))
-                    return order if 1 <= order <= 100 else None
-
                 data_columns = [col_desc, col_len, col_wid, col_hei, col_wt, col_qty]
 
                 for idx, row in df.iterrows():
@@ -642,8 +633,7 @@ if st.session_state.current_tab == "PRODUCTS":
                         "wt": parse_number(row[col_wt]),
                         "qty": parse_number(row[col_qty]),
                         "color": colors[len(imported_products) % len(colors)],
-                        "cargo_type": "General Cargo",
-                        "loading_order": parse_loading_order(row[col_order]) if col_order is not None else None,
+                        "cargo_type": "General Cargo"
                     })
                 if not imported_products:
                     st.warning("No valid product rows were found in the uploaded file.")
@@ -744,16 +734,16 @@ if st.session_state.current_tab == "PRODUCTS":
             show_add_product_dialog()
     with add_cols[1]:
         if st.button("Add Lumber Bundle"):
-            st.session_state.product_list.append({"name": "Lumber Bundle", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
+            st.session_state.product_list.append({"name": "Lumber Bundle", "l": 96, "w": 12, "h": 12, "wt": 35, "qty": 10, "color": "#8e5a2a", "cargo_type": "Lumber Bundle"})
             st.session_state.product_list_version += 1
             st.rerun()
     with add_cols[2]:
         if st.button("Reset All"):
             # Reset product list to defaults
             st.session_state.product_list = [
-                {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#2ecc71", "cargo_type": "General Cargo"},
-                {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#9b59b6", "cargo_type": "General Cargo"},
-                {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 0, "color": "#3498db", "cargo_type": "General Cargo"},
+                {"name": "Boxes 1", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 80, "color": "#2ecc71", "cargo_type": "General Cargo"},
+                {"name": "Sacks", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 100, "color": "#9b59b6", "cargo_type": "General Cargo"},
+                {"name": "Big bags", "l": 0, "w": 0, "h": 0, "wt": 0, "qty": 10, "color": "#3498db", "cargo_type": "General Cargo"},
             ]
             st.session_state.product_list_version += 1
             # Reset all calculation related state
@@ -790,15 +780,36 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
     st.subheader("Step 2: Select Container / Truck")
     
     container_options = list(CONTAINER_DICT.keys()) + [c.get("name", f"Custom {i+1}") for i, c in enumerate(st.session_state.custom_containers)]
-    selected_container_index = container_options.index(st.session_state.selected_container) if st.session_state.selected_container in container_options else 0
-    # A single selector updates the chosen vehicle/container immediately.
-    selected_container = st.selectbox(
-        "Select truck or container:",
-        container_options,
-        index=selected_container_index,
+    custom_by_name = {item.get("name"): item for item in st.session_state.custom_containers}
+
+    def is_truck_option(name):
+        custom = custom_by_name.get(name, {})
+        return "truck" in name.lower() or "truck" in str(custom.get("kind", "")).lower()
+
+    selected_before = st.session_state.get("selected_containers", [st.session_state.selected_container])
+    current_is_truck = is_truck_option(selected_before[0]) if selected_before else is_truck_option(st.session_state.selected_container)
+    vehicle_type = st.radio(
+        "Vehicle type",
+        ["Containers", "Trucks"],
+        index=1 if current_is_truck else 0,
+        horizontal=True,
     )
-    st.session_state.selected_container = selected_container
-    st.session_state.selected_containers = [selected_container]
+    selecting_trucks = vehicle_type == "Trucks"
+    vehicle_options = [name for name in container_options if is_truck_option(name) == selecting_trucks]
+    defaults = [name for name in selected_before if name in vehicle_options]
+    if not defaults and st.session_state.selected_container in vehicle_options:
+        defaults = [st.session_state.selected_container]
+    selected_vehicles = st.multiselect(
+        f"Select one or more {'trucks' if selecting_trucks else 'containers'} for this calculation:",
+        vehicle_options,
+        default=defaults,
+        help="Select two or more vehicles to calculate one combined loading plan.",
+    )
+    if not selected_vehicles:
+        st.info("Select at least one container or truck to configure the loading plan.")
+        st.stop()
+    st.session_state.selected_container = selected_vehicles[0]
+    st.session_state.selected_containers = selected_vehicles
 
     # Upload custom containers configuration (JSON)
     uploaded_containers_file = st.file_uploader(
@@ -925,6 +936,12 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
         else:
             st.session_state.custom_dims = {"l": 6000, "w": 2400, "h": 2400, "m": 25000}
 
+    st.session_state.custom_dimensions = {
+        item["name"]: item
+        for item in st.session_state.custom_containers
+        if item.get("name") in st.session_state.selected_containers
+    }
+
 
     st.write("---")
     st.subheader("Loading Configuration")
@@ -1032,7 +1049,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             st.rerun()
         st.stop()
 
-    custom_dims = st.session_state.get("custom_dims", {"l": 6000, "w": 2400, "h": 2400, "m": 25000})
+    custom_dimensions = st.session_state.get("custom_dimensions", {})
 # Deprecated: loading_config is now generated per selected strategy below
     try:
         with st.spinner("Calculating optimized loading plan..."):
@@ -1055,7 +1072,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             calculation_input = {
                 "products": st.session_state.product_list,
                 "containers": containers_to_compute,
-                "dimensions": custom_dims,
+                "dimensions": custom_dimensions,
                 "quantity": int(st.session_state.selected_container_quantity),
                 "strategies": selected_strategies,
                 "load_direction": st.session_state.load_direction,
@@ -1075,29 +1092,29 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                     'containers': containers_to_compute,
                     'signature': calculation_signature,
                 }
-                for cont in containers_to_compute:
-                    for strat in selected_strategies:
-                        config = make_loading_config(
-                            load_direction=st.session_state.load_direction,
-                            heavy_priority=st.session_state.heavy_priority,
-                            placement_strategy=strat,
-                            max_additional_containers=int(st.session_state.max_additional_containers),
-                            minimum_support_ratio=float(st.session_state.minimum_support_ratio),
-                            contact_compaction=bool(st.session_state.contact_compaction),
+                plan_id = "||".join(containers_to_compute)
+                st.session_state.loading_plans['plan_id'] = plan_id
+                for strat in selected_strategies:
+                    config = make_loading_config(
+                        load_direction=st.session_state.load_direction,
+                        heavy_priority=st.session_state.heavy_priority,
+                        placement_strategy=strat,
+                        max_additional_containers=int(st.session_state.max_additional_containers),
+                        minimum_support_ratio=float(st.session_state.minimum_support_ratio),
+                        contact_compaction=bool(st.session_state.contact_compaction),
+                    )
+                    try:
+                        plan = calculate_loading_cached(
+                            st.session_state.product_list,
+                            tuple(containers_to_compute),
+                            custom_dimensions,
+                            int(st.session_state.selected_container_quantity),
+                            config,
                         )
-                        try:
-                            plan = calculate_loading_cached(
-    st.session_state.product_list,
-    cont,
-    custom_dims,
-    int(st.session_state.selected_container_quantity),
-    config
-)
-                        except Exception as exc:
-                            st.warning(f"Failed to compute loading for container '{cont}' strategy '{strat}': {exc}")
-                            plan = None
-                        # Store with composite key
-                        st.session_state.loading_plans[f"{cont}|{strat}"] = plan
+                    except Exception as exc:
+                        st.warning(f"Failed to compute loading for selected vehicles, strategy '{strat}': {exc}")
+                        plan = None
+                    st.session_state.loading_plans[f"{plan_id}|{strat}"] = plan
                 st.session_state.recalculate_loading = False
             # Initialize variant navigation index
             if "variant_idx" not in st.session_state or st.session_state.variant_idx >= len(selected_strategies):
@@ -1110,7 +1127,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
             containers_list = st.session_state.loading_plans.get('containers', [st.session_state.selected_container])
         # Composite key to retrieve the correct loading plan
         selected_container_view = containers_list[0]
-        plan_key = f"{selected_container_view}|{selected_variant}"
+        plan_id = st.session_state.loading_plans.get('plan_id', "||".join(containers_list))
+        plan_key = f"{plan_id}|{selected_variant}"
         loading_plan = st.session_state.loading_plans.get(plan_key)
         if loading_plan is None:
             raise ValueError("Loading plan not found for the selected configuration.")
