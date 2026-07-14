@@ -16,6 +16,11 @@ PLACEMENT_HEURISTICS = (
 )
 
 
+def _candidate_score(packed):
+    """Volume is primary; the Beam weighted score breaks volume ties."""
+    return (packed.volume_pct, getattr(packed, "optimization_score", 0.0))
+
+
 def _layout_score(packed):
     """Score a complete vehicle layout with volume utilization dominant."""
     if not packed.items:
@@ -58,15 +63,45 @@ def _candidate_configs(items, config):
     return candidates[:max(1, int(getattr(config, "search_limit", len(candidates))))]
 
 
+def _incremental_repacking(spec, items, role, packed, remaining, config):
+    """Retry a near-full layout with a wider Beam before committing it.
+
+    This is a safe rollback-style repack: the original layout remains the
+    fallback and is replaced only when the widened free-space search improves
+    the complete plan score.  Ordered loads keep their original order.
+    """
+    if packed.volume_pct >= 98.0:
+        return packed, remaining
+    repack_config = replace(
+        config,
+        placement_strategy="best_free_space_reduction",
+        beam_width=max(int(getattr(config, "beam_width", 12)), 24),
+    )
+    repacked, repacked_remaining = pack_container(spec, items, role=role, config=repack_config)
+    if _candidate_score(repacked) > _candidate_score(packed):
+        return repacked, repacked_remaining
+    return packed, remaining
+
+
+def optimize_single_container(spec, cartons, role="Selected", config=None):
+    """Find and commit the best plan for exactly one container/truck.
+
+    No carton is assigned to another vehicle while this function evaluates its
+    full sequence × orientation × placement-heuristic search space.
+    """
+    config = config or LoadingConfig()
+    candidate_plans = []
+    for candidate_config in _candidate_configs(cartons, config):
+        packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
+        score = _candidate_score(packed)
+        candidate_plans.append((score, packed, remaining, candidate_config))
+    _, best_packed, best_remaining, best_config = max(candidate_plans, key=lambda candidate: candidate[0])
+    return _incremental_repacking(spec, cartons, role, best_packed, best_remaining, best_config)
+
+
 def _pack_fullest_vehicle(spec, items, role, config):
-    """Search all configured layouts before handing cargo to another vehicle."""
-    best_packed, best_remaining, best_score = None, list(items), None
-    for candidate_config in _candidate_configs(items, config):
-        packed, remaining = pack_container(spec, items, role=role, config=candidate_config)
-        score = _layout_score(packed)
-        if best_score is None or score > best_score:
-            best_packed, best_remaining, best_score = packed, remaining, score
-    return best_packed, best_remaining
+    """Compatibility wrapper used by the multi-container engine."""
+    return optimize_single_container(spec, items, role, config)
 
 
 def _pack_fixed_specs(specs, items, config):

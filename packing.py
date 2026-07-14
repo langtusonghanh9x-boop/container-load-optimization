@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from itertools import permutations
 
 from py3dbp import Bin, Item
@@ -265,40 +266,227 @@ def _apply_contact_compaction(packed_items, container, config):
     return compacted
 
 
-def pack_container(container: ContainerSpec, items, role="Selected", config=None):
-    config = config or LoadingConfig()
-    active_bin = Bin(container.name, container.length_mm, container.width_mm, container.height_mm, container.max_weight_kg)
-    active_bin.format_numbers(3)
-    py_items = []
-    cargo_by_id = {}
-    for cargo in sort_items_for_loading(items, config):
-        py_item = Item(cargo.id, cargo.length_mm, cargo.width_mm, cargo.height_mm, cargo.weight_kg)
-        py_item.format_numbers(3)
-        py_items.append(py_item)
-        cargo_by_id[cargo.id] = cargo
+@dataclass(frozen=True)
+class _FreeSpace:
+    x: float
+    y: float
+    z: float
+    length: float
+    width: float
+    height: float
 
-    for py_item in py_items:
-        if not _pack_to_bin(active_bin, py_item, cargo_by_id[py_item.name], config):
-            active_bin.unfitted_items.append(py_item)
+    @property
+    def volume(self):
+        return self.length * self.width * self.height
 
-    packed = []
-    for py_item in active_bin.items:
-        cargo = cargo_by_id[py_item.name]
-        size = tuple(float(value) for value in py_item.get_dimension())
-        position = _normalize_position(
-            tuple(float(value) for value in py_item.position),
-            size,
-            container,
-            config,
+
+@dataclass
+class _BeamLayout:
+    items: list = field(default_factory=list)
+    spaces: list = field(default_factory=list)
+    score: float = 0.0
+
+
+def _cargo_orientations(cargo):
+    """Return each permitted physical orientation exactly once."""
+    base = (float(cargo.length_mm), float(cargo.width_mm), float(cargo.height_mm))
+    if not (cargo.tilt_to_length or cargo.tilt_to_width):
+        return sorted(set(permutations(base)))
+    allowed = [base]
+    if cargo.tilt_to_length:
+        allowed.append((base[2], base[1], base[0]))
+    if cargo.tilt_to_width:
+        allowed.append((base[0], base[2], base[1]))
+    return list(dict.fromkeys(allowed))
+
+
+def _support_allowed(items, cargo, position, size, config):
+    x, y, z = position
+    dx, dy, dz = size
+    if cargo.disable_stacking and z > 1e-6:
+        return False
+    if cargo.max_stack_height_mm is not None and z + dz > cargo.max_stack_height_mm + 1e-6:
+        return False
+    if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
+        return False
+    if z <= 1e-6:
+        return True
+    supported = 0.0
+    for other in items:
+        ox, oy, oz = other.position
+        odx, ody, odz = other.size
+        if abs(oz + odz - z) > 1e-6:
+            continue
+        overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+        if overlap <= 0:
+            continue
+        if other.cargo.disable_stacking:
+            return False
+        if other.cargo.max_stack_mass_kg is not None and cargo.weight_kg > other.cargo.max_stack_mass_kg + 1e-6:
+            return False
+        supported += overlap
+    return supported / max(dx * dy, 1.0) >= float(getattr(config, "minimum_support_ratio", 0.0))
+
+
+def _prune_and_merge_spaces(spaces):
+    """Maintain a compact free-space tree after every placement."""
+    kept = []
+    for space in spaces:
+        if min(space.length, space.width, space.height) <= 1e-6:
+            continue
+        contained = any(
+            other is not space and space.x >= other.x - 1e-6 and space.y >= other.y - 1e-6 and space.z >= other.z - 1e-6
+            and space.x + space.length <= other.x + other.length + 1e-6
+            and space.y + space.width <= other.y + other.width + 1e-6
+            and space.z + space.height <= other.z + other.height + 1e-6
+            for other in spaces
         )
-        packed.append(PackedItem(
-            cargo=cargo,
-            position=position,
-            size=size,
-        ))
+        if not contained:
+            kept.append(space)
+    changed = True
+    while changed:
+        changed = False
+        for i, left in enumerate(kept):
+            for j in range(i + 1, len(kept)):
+                right = kept[j]
+                merged = None
+                if left.y == right.y and left.z == right.z and left.width == right.width and left.height == right.height and abs(left.x + left.length - right.x) < 1e-6:
+                    merged = _FreeSpace(left.x, left.y, left.z, left.length + right.length, left.width, left.height)
+                elif left.x == right.x and left.z == right.z and left.length == right.length and left.height == right.height and abs(left.y + left.width - right.y) < 1e-6:
+                    merged = _FreeSpace(left.x, left.y, left.z, left.length, left.width + right.width, left.height)
+                elif left.x == right.x and left.y == right.y and left.length == right.length and left.width == right.width and abs(left.z + left.height - right.z) < 1e-6:
+                    merged = _FreeSpace(left.x, left.y, left.z, left.length, left.width, left.height + right.height)
+                if merged is not None:
+                    kept = [space for index, space in enumerate(kept) if index not in (i, j)] + [merged]
+                    changed = True
+                    break
+            if changed:
+                break
+    return sorted(kept, key=lambda space: (space.z, space.x, space.y, space.volume))
 
-    packed = _apply_contact_compaction(packed, container, config)
+
+def _split_free_space(layout, space_index, size):
+    space = layout.spaces[space_index]
+    dx, dy, dz = size
+    spaces = [value for index, value in enumerate(layout.spaces) if index != space_index]
+    # A non-overlapping guillotine partition: right, then width, then above.
+    spaces.extend((
+        _FreeSpace(space.x + dx, space.y, space.z, space.length - dx, space.width, space.height),
+        _FreeSpace(space.x, space.y + dy, space.z, dx, space.width - dy, space.height),
+        _FreeSpace(space.x, space.y, space.z + dz, dx, dy, space.height - dz),
+    ))
+    return _prune_and_merge_spaces(spaces)
+
+
+def _layout_score(layout, container, total_cartons):
+    """Weighted score used both to retain the Beam top-N and final plans."""
+    if not layout.items:
+        return 0.0
+    used = sum(item.size[0] * item.size[1] * item.size[2] for item in layout.items)
+    capacity = max(container.length_mm * container.width_mm * container.height_mm, 1.0)
+    fill_rate = used / capacity
+    void_ratio = 1.0 - fill_rate
+    contact_area = sum(_contact_area_for_item(item, layout.items) for item in layout.items) / max(used ** (2 / 3), 1.0)
+    support_ratio = _average_support(layout.items)
+    total_weight = max(sum(item.cargo.weight_kg for item in layout.items), 1e-9)
+    cx = sum((item.position[0] + item.size[0] / 2) * item.cargo.weight_kg for item in layout.items) / total_weight
+    cy = sum((item.position[1] + item.size[1] / 2) * item.cargo.weight_kg for item in layout.items) / total_weight
+    cz = sum((item.position[2] + item.size[2] / 2) * item.cargo.weight_kg for item in layout.items) / total_weight
+    weight_balance = max(0.0, 1.0 - (((cx - container.length_mm / 2) / max(container.length_mm / 2, 1)) ** 2 + ((cy - container.width_mm / 2) / max(container.width_mm / 2, 1)) ** 2) ** 0.5)
+    low_cog = max(0.0, 1.0 - cz / max(container.height_mm, 1))
+    fragmentation = 1.0 / max(len(layout.spaces), 1)
+    loading_order = len(layout.items) / max(total_cartons, 1)
+    return fill_rate * 55 - void_ratio * 15 + contact_area * 10 + support_ratio * 8 + weight_balance * 5 + low_cog * 3 + fragmentation * 2 + loading_order * 2
+
+
+def _contact_area_for_item(item, items):
+    contact = 0.0
+    x, y, z = item.position
+    dx, dy, dz = item.size
+    for other in items:
+        if other is item:
+            continue
+        ox, oy, oz = other.position
+        odx, ody, odz = other.size
+        if abs(oz + odz - z) < 1e-6:
+            contact += _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+    return contact
+
+
+def _average_support(items):
+    if not items:
+        return 0.0
+    ratios = []
+    for item in items:
+        if item.position[2] <= 1e-6:
+            ratios.append(1.0)
+            continue
+        ratios.append(min(1.0, _contact_area_for_item(item, items) / max(item.size[0] * item.size[1], 1.0)))
+    return sum(ratios) / len(ratios)
+
+
+def _heuristic_key(candidate, heuristic):
+    space, size = candidate
+    x, y, z = space.x, space.y, space.z
+    if heuristic == "length_first":
+        return (-x, -z, -y)
+    if heuristic == "width_first":
+        return (-y, -z, -x)
+    if heuristic == "best_volume_fit":
+        return (-(space.volume - size[0] * size[1] * size[2]), -z)
+    if heuristic == "best_free_space_reduction":
+        return (-min(space.length - size[0], space.width - size[1], space.height - size[2]), -z)
+    if heuristic == "best_contact_area":
+        return (-(x + y + z), -z)
+    return (-z, -x, -y)
+
+
+def beam_search_pack(container, cartons, config):
+    """Top-N Beam Search over the free-space tree for one container only."""
+    beam = [_BeamLayout(spaces=[_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])]
+    beam_width = max(1, int(getattr(config, "beam_width", 12)))
+    total = len(cartons)
+    for carton in cartons:
+        new_beam = []
+        for layout in beam:
+            candidates = []
+            current_weight = sum(item.cargo.weight_kg for item in layout.items)
+            for index, space in enumerate(layout.spaces):
+                for size in _cargo_orientations(carton):
+                    if size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6 and size[2] <= space.height + 1e-6:
+                        if current_weight + carton.weight_kg <= container.max_weight_kg + 1e-6 and _support_allowed(layout.items, carton, (space.x, space.y, space.z), size, config):
+                            candidates.append((index, space, size))
+            # Keep an unpacked branch, so an early carton does not prevent a
+            # later carton from using a compatible void.
+            new_beam.append(_BeamLayout(list(layout.items), list(layout.spaces), layout.score))
+            for index, space, size in candidates:
+                placed = PackedItem(carton, (space.x, space.y, space.z), size)
+                candidate = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size))
+                candidate.score = _layout_score(candidate, container, total)
+                new_beam.append(candidate)
+        # Deduplicate equivalent layouts before retaining the global top-N.
+        unique = {}
+        for layout in new_beam:
+            signature = tuple(sorted((item.cargo.id, tuple(round(value, 3) for value in item.position), tuple(round(value, 3) for value in item.size)) for item in layout.items))
+            if signature not in unique or layout.score > unique[signature].score:
+                unique[signature] = layout
+        beam = sorted(unique.values(), key=lambda layout: layout.score, reverse=True)[:beam_width]
+    return max(beam, key=lambda layout: layout.score)
+
+
+def pack_container(container: ContainerSpec, items, role="Selected", config=None):
+    """Optimize a single vehicle with Beam Search and commit only its best layout."""
+    config = config or LoadingConfig()
+    layout = beam_search_pack(container, sort_items_for_loading(items, config), config)
+    packed = layout.items
+    if getattr(config, "load_direction", "inside_out") == "door_to_inside":
+        packed = [PackedItem(item.cargo, _normalize_position(item.position, item.size, container, config), item.size) for item in packed]
 
     packed_ids = {item.cargo.id for item in packed}
     leftovers = [item for item in items if item.id not in packed_ids]
-    return PackedContainer(spec=container, items=packed, role=role), leftovers
+    result = PackedContainer(spec=container, items=packed, role=role)
+    # Kept on the plan so the global engine can compare the exact weighted
+    # Beam score after each complete candidate layout is generated.
+    result.optimization_score = layout.score
+    result.score = layout.score
+    return result, leftovers

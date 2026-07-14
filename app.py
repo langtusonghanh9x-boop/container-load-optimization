@@ -129,7 +129,7 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
-PACKING_ENGINE_VERSION = "20260714-global-layout-search-v2"
+PACKING_ENGINE_VERSION = "20260714-beam-search-free-space-v1"
 
 
 @st.cache_data(show_spinner=False)
