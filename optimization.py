@@ -1,4 +1,5 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from math import sqrt
 from time import monotonic
 
@@ -162,12 +163,31 @@ def optimize_single_container(spec, cartons, role="Selected", config=None):
     # Stage 3 applies Beam only to the leading difficult cartons, never to the
     # full detailed load.  Each result is compared before it can be committed.
     needs_local_search = initial_packed.volume_pct < settings["target"] * 100 or len(initial_remaining) > 0
+    # On a large Fast job, the initial O(n) plan is the commercial latency
+    # guarantee.  Do not start a second pass that cannot finish in budget.
+    if getattr(config, "optimization_profile", "balanced") == "fast" and len(cartons) > 500:
+        needs_local_search = False
     if needs_local_search:
-        for candidate_config in _local_candidate_configs(cartons, config, settings):
-            if monotonic() >= deadline:
-                break
-            packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
-            candidate_plans.append((_candidate_score(packed), packed, remaining, candidate_config))
+        local_configs = _local_candidate_configs(cartons, config, settings)
+        # Independent local variants share no mutable packing state and can be
+        # evaluated concurrently.  Large loads deliberately stay single-pass:
+        # their fast state engine is both quicker and more memory efficient.
+        if (len(local_configs) > 1 and len(cartons) <= 500
+                and getattr(config, "parallel_search", True)):
+            def solve(candidate_config):
+                packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
+                return _candidate_score(packed), packed, remaining, candidate_config
+            with ThreadPoolExecutor(max_workers=min(4, len(local_configs))) as executor:
+                for result in executor.map(solve, local_configs):
+                    if monotonic() >= deadline:
+                        break
+                    candidate_plans.append(result)
+        else:
+            for candidate_config in local_configs:
+                if monotonic() >= deadline:
+                    break
+                packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
+                candidate_plans.append((_candidate_score(packed), packed, remaining, candidate_config))
     _, best_packed, best_remaining, best_config = max(candidate_plans, key=lambda candidate: candidate[0])
     # Stage 4: incremental repack is a rollback-safe final local improvement.
     if monotonic() < deadline and getattr(config, "optimization_profile", "balanced") != "fast":

@@ -119,3 +119,4 @@ class LoadingConfig:
     beam_carton_limit: int = 20
     optimization_profile: str = "balanced"
     time_budget_seconds: float = 60.0
+    parallel_search: bool = True

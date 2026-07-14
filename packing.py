@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from heapq import heappush, heappop
 from itertools import permutations
 
 from py3dbp import Bin, Item
@@ -8,6 +9,8 @@ from .models import CargoItem, ContainerSpec, LoadingConfig, PackedContainer, Pa
 
 
 MAX_ACTIVE_FREE_SPACES = 128
+FAST_FREE_SPACE_LIMIT = 4096
+MAX_PLACEMENT_CANDIDATES = 6
 
 
 def can_fit_item(item: CargoItem, container: ContainerSpec) -> bool:
@@ -291,6 +294,109 @@ class _BeamLayout:
     weight: float = 0.0
 
 
+class _FreeSpaceIndex:
+    """Dimension-bucket spatial index with a lazy priority queue.
+
+    It avoids scanning every free space for every carton.  Spaces are indexed
+    by their three dimension classes; each bucket has a low-Z / best-fit heap.
+    Entries are invalidated lazily when a space is split.
+    """
+    def __init__(self, spaces=()):
+        self.spaces = {}
+        self.buckets = {}
+        self.global_heap = []
+        self.next_id = 0
+        for space in spaces:
+            self.add(space)
+
+    @staticmethod
+    def _key(space):
+        return (int(space.length // 250), int(space.width // 250), int(space.height // 250))
+
+    @staticmethod
+    def _priority(space):
+        return (space.z, space.volume, space.x, space.y)
+
+    def add(self, space):
+        if min(space.length, space.width, space.height) <= 1e-6:
+            return
+        ident = self.next_id
+        self.next_id += 1
+        self.spaces[ident] = space
+        key = self._key(space)
+        heap = self.buckets.setdefault(key, [])
+        entry = (*self._priority(space), ident)
+        heappush(heap, entry)
+        heappush(self.global_heap, entry)
+
+    def remove(self, ident):
+        self.spaces.pop(ident, None)
+
+    def candidates(self, size, limit=MAX_PLACEMENT_CANDIDATES):
+        selected = []
+        held = []
+        # Priority queue gives the best low-Z candidates without traversing all
+        # dimension buckets.  The exact dimensions are checked before scoring.
+        while self.global_heap and len(held) < limit * 2 and len(selected) < limit:
+            entry = heappop(self.global_heap)
+            ident = entry[-1]
+            space = self.spaces.get(ident)
+            if space is None:
+                continue
+            held.append(entry)
+            if size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6 and size[2] <= space.height + 1e-6:
+                selected.append((ident, space))
+        for entry in held:
+            heappush(self.global_heap, entry)
+        return selected
+
+    def split(self, ident, size):
+        space = self.spaces.get(ident)
+        if space is None:
+            return
+        self.remove(ident)
+        dx, dy, dz = size
+        self.add(_FreeSpace(space.x + dx, space.y, space.z, space.length - dx, space.width, space.height))
+        self.add(_FreeSpace(space.x, space.y + dy, space.z, dx, space.width - dy, space.height))
+        self.add(_FreeSpace(space.x, space.y, space.z + dz, dx, dy, space.height - dz))
+        # Bound memory for highly detailed loads.  Discard only the least
+        # reachable high-Z fragments; current low-Z regions stay indexed.
+        if len(self.spaces) > int(FAST_FREE_SPACE_LIMIT * 1.15):
+            keep = sorted(self.spaces, key=lambda key: self._priority(self.spaces[key]))[:FAST_FREE_SPACE_LIMIT]
+            self.spaces = {key: self.spaces[key] for key in keep}
+
+
+class _MutablePackingState:
+    """Incremental state: no layout copies while greedy packing proceeds."""
+    def __init__(self, container, spaces=None, items=None):
+        self.container = container
+        self.items = list(items or ())
+        self.free = _FreeSpaceIndex(spaces or [_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])
+        self.weight = sum(item.cargo.weight_kg for item in self.items)
+        self.used_volume = sum(item.size[0] * item.size[1] * item.size[2] for item in self.items)
+        self.top_surfaces = {}
+        self.top_cells = {}
+        for item in self.items:
+            self._index_top(item)
+
+    def _index_top(self, item):
+        top = round(item.position[2] + item.size[2], 3)
+        self.top_surfaces.setdefault(top, []).append(item)
+        x, y, _ = item.position
+        dx, dy, _ = item.size
+        for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+            for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+                self.top_cells.setdefault((top, gx, gy), []).append(item)
+
+    def place(self, carton, ident, space, size):
+        item = PackedItem(carton, (space.x, space.y, space.z), size)
+        self.items.append(item)
+        self.weight += carton.weight_kg
+        self.used_volume += size[0] * size[1] * size[2]
+        self._index_top(item)
+        self.free.split(ident, size)
+
+
 def _cargo_orientations(cargo):
     """Return each permitted physical orientation exactly once."""
     base = (float(cargo.length_mm), float(cargo.width_mm), float(cargo.height_mm))
@@ -321,6 +427,38 @@ def _support_allowed(items, cargo, position, size, config):
         odx, ody, odz = other.size
         if abs(oz + odz - z) > 1e-6:
             continue
+        overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+        if overlap <= 0:
+            continue
+        if other.cargo.disable_stacking:
+            return False
+        if other.cargo.max_stack_mass_kg is not None and cargo.weight_kg > other.cargo.max_stack_mass_kg + 1e-6:
+            return False
+        supported += overlap
+    return supported / max(dx * dy, 1.0) >= float(getattr(config, "minimum_support_ratio", 0.0))
+
+
+def _support_allowed_indexed(state, cargo, position, size, config):
+    """Support test restricted to the cached top surface at this Z level."""
+    x, y, z = position
+    dx, dy, dz = size
+    if cargo.disable_stacking and z > 1e-6:
+        return False
+    if cargo.max_stack_height_mm is not None and z + dz > cargo.max_stack_height_mm + 1e-6:
+        return False
+    if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
+        return False
+    if z <= 1e-6:
+        return True
+    supported = 0.0
+    supports = {}
+    for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+        for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+            for other in state.top_cells.get((round(z, 3), gx, gy), ()):
+                supports[id(other)] = other
+    for other in supports.values():
+        ox, oy, _ = other.position
+        odx, ody, _ = other.size
         overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
         if overlap <= 0:
             continue
@@ -455,9 +593,9 @@ def _heuristic_key(candidate, heuristic):
     return (-z, -x, -y)
 
 
-def _greedy_place(layout, carton, container, config, total, orientation_cache=None):
+def _greedy_place(state, carton, config, orientation_cache=None):
     """Fast Best-Fit / Bottom-Left-Fill step used after the Beam prefix."""
-    current_weight = layout.weight
+    current_weight = state.weight
     choices = []
     orientations = _cargo_orientations(carton)
     if orientation_cache is not None:
@@ -465,20 +603,18 @@ def _greedy_place(layout, carton, container, config, total, orientation_cache=No
         if orientations is None:
             orientations = _cargo_orientations(carton)
             orientation_cache[carton.id] = orientations
-    for index, space in enumerate(layout.spaces):
-        for size in orientations:
-            if (size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6
-                    and size[2] <= space.height + 1e-6
-                    and current_weight + carton.weight_kg <= container.max_weight_kg + 1e-6
-                    and _support_allowed(layout.items, carton, (space.x, space.y, space.z), size, config)):
-                choices.append((index, space, size))
+    for size in orientations:
+        if current_weight + carton.weight_kg > state.container.max_weight_kg + 1e-6:
+            break
+        for ident, space in state.free.candidates(size):
+            if _support_allowed_indexed(state, carton, (space.x, space.y, space.z), size, config):
+                choices.append((ident, space, size))
     if not choices:
-        return layout
+        return False
     strategy = getattr(config, "placement_strategy", "bottom_left_fill")
-    index, space, size = max(choices, key=lambda choice: _heuristic_key((choice[1], choice[2]), strategy))
-    placed = PackedItem(carton, (space.x, space.y, space.z), size)
-    result = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size), weight=layout.weight + carton.weight_kg)
-    return result
+    ident, space, size = max(choices, key=lambda choice: _heuristic_key((choice[1], choice[2]), strategy))
+    state.place(carton, ident, space, size)
+    return True
 
 
 def beam_search_pack(container, cartons, config):
@@ -521,10 +657,12 @@ def beam_search_pack(container, cartons, config):
     # packing for all remaining cartons.  This prevents a Beam explosion on
     # detailed loads with thousands of cartons.
     best = max(beam, key=lambda layout: layout.score)
+    state = _MutablePackingState(container, best.spaces, best.items)
     for carton in cartons[beam_limit:]:
-        best = _greedy_place(best, carton, container, config, total, orientation_cache)
-    best.score = _layout_score(best, container, total)
-    return best
+        _greedy_place(state, carton, config, orientation_cache)
+    result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
+    result.score = _layout_score(result, container, total)
+    return result
 
 
 def pack_container(container: ContainerSpec, items, role="Selected", config=None):
