@@ -7,6 +7,9 @@ from py3dbp.main import START_POSITION, RotationType, intersect
 from .models import CargoItem, ContainerSpec, LoadingConfig, PackedContainer, PackedItem
 
 
+MAX_ACTIVE_FREE_SPACES = 128
+
+
 def can_fit_item(item: CargoItem, container: ContainerSpec) -> bool:
     cargo_dims = [item.length_mm, item.width_mm, item.height_mm]
     limit_dims = [container.length_mm, container.width_mm, container.height_mm]
@@ -285,6 +288,7 @@ class _BeamLayout:
     items: list = field(default_factory=list)
     spaces: list = field(default_factory=list)
     score: float = 0.0
+    weight: float = 0.0
 
 
 def _cargo_orientations(cargo):
@@ -330,6 +334,12 @@ def _support_allowed(items, cargo, position, size, config):
 
 def _prune_and_merge_spaces(spaces):
     """Maintain a compact free-space tree after every placement."""
+    # Large detailed loads must not spend quadratic time merging every historic
+    # void.  This is the free-space priority cache: retain the most reachable
+    # low-Z spaces and let the local Beam handle difficult regions.
+    if len(spaces) > MAX_ACTIVE_FREE_SPACES:
+        valid = [space for space in spaces if min(space.length, space.width, space.height) > 1e-6]
+        return sorted(valid, key=lambda space: (space.z, -space.volume, space.x, space.y))[:MAX_ACTIVE_FREE_SPACES]
     kept = []
     for space in spaces:
         if min(space.length, space.width, space.height) <= 1e-6:
@@ -386,8 +396,12 @@ def _layout_score(layout, container, total_cartons):
     capacity = max(container.length_mm * container.width_mm * container.height_mm, 1.0)
     fill_rate = used / capacity
     void_ratio = 1.0 - fill_rate
-    contact_area = sum(_contact_area_for_item(item, layout.items) for item in layout.items) / max(used ** (2 / 3), 1.0)
-    support_ratio = _average_support(layout.items)
+    # Use a bounded geometry sample for detailed loads; fill and weight remain
+    # exact while secondary quality metrics stay fast at thousands of cartons.
+    stride = max(1, len(layout.items) // 300)
+    metric_items = layout.items[::stride]
+    contact_area = sum(_contact_area_for_item(item, metric_items) for item in metric_items) / max(used ** (2 / 3), 1.0)
+    support_ratio = _average_support(metric_items)
     total_weight = max(sum(item.cargo.weight_kg for item in layout.items), 1e-9)
     cx = sum((item.position[0] + item.size[0] / 2) * item.cargo.weight_kg for item in layout.items) / total_weight
     cy = sum((item.position[1] + item.size[1] / 2) * item.cargo.weight_kg for item in layout.items) / total_weight
@@ -441,27 +455,59 @@ def _heuristic_key(candidate, heuristic):
     return (-z, -x, -y)
 
 
+def _greedy_place(layout, carton, container, config, total, orientation_cache=None):
+    """Fast Best-Fit / Bottom-Left-Fill step used after the Beam prefix."""
+    current_weight = layout.weight
+    choices = []
+    orientations = _cargo_orientations(carton)
+    if orientation_cache is not None:
+        orientations = orientation_cache.get(carton.id)
+        if orientations is None:
+            orientations = _cargo_orientations(carton)
+            orientation_cache[carton.id] = orientations
+    for index, space in enumerate(layout.spaces):
+        for size in orientations:
+            if (size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6
+                    and size[2] <= space.height + 1e-6
+                    and current_weight + carton.weight_kg <= container.max_weight_kg + 1e-6
+                    and _support_allowed(layout.items, carton, (space.x, space.y, space.z), size, config)):
+                choices.append((index, space, size))
+    if not choices:
+        return layout
+    strategy = getattr(config, "placement_strategy", "bottom_left_fill")
+    index, space, size = max(choices, key=lambda choice: _heuristic_key((choice[1], choice[2]), strategy))
+    placed = PackedItem(carton, (space.x, space.y, space.z), size)
+    result = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size), weight=layout.weight + carton.weight_kg)
+    return result
+
+
 def beam_search_pack(container, cartons, config):
-    """Top-N Beam Search over the free-space tree for one container only."""
+    """Hybrid packing: bounded Beam prefix followed by O(n) greedy packing."""
     beam = [_BeamLayout(spaces=[_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])]
     beam_width = max(1, int(getattr(config, "beam_width", 12)))
     total = len(cartons)
-    for carton in cartons:
+    beam_limit = min(total, max(0, int(getattr(config, "beam_carton_limit", 20))))
+    orientation_cache = {}
+    for carton in cartons[:beam_limit]:
         new_beam = []
         for layout in beam:
             candidates = []
-            current_weight = sum(item.cargo.weight_kg for item in layout.items)
+            current_weight = layout.weight
+            orientations = orientation_cache.get(carton.id)
+            if orientations is None:
+                orientations = _cargo_orientations(carton)
+                orientation_cache[carton.id] = orientations
             for index, space in enumerate(layout.spaces):
-                for size in _cargo_orientations(carton):
+                for size in orientations:
                     if size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6 and size[2] <= space.height + 1e-6:
                         if current_weight + carton.weight_kg <= container.max_weight_kg + 1e-6 and _support_allowed(layout.items, carton, (space.x, space.y, space.z), size, config):
                             candidates.append((index, space, size))
             # Keep an unpacked branch, so an early carton does not prevent a
             # later carton from using a compatible void.
-            new_beam.append(_BeamLayout(list(layout.items), list(layout.spaces), layout.score))
+            new_beam.append(_BeamLayout(list(layout.items), list(layout.spaces), layout.score, layout.weight))
             for index, space, size in candidates:
                 placed = PackedItem(carton, (space.x, space.y, space.z), size)
-                candidate = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size))
+                candidate = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size), weight=layout.weight + carton.weight_kg)
                 candidate.score = _layout_score(candidate, container, total)
                 new_beam.append(candidate)
         # Deduplicate equivalent layouts before retaining the global top-N.
@@ -471,7 +517,14 @@ def beam_search_pack(container, cartons, config):
             if signature not in unique or layout.score > unique[signature].score:
                 unique[signature] = layout
         beam = sorted(unique.values(), key=lambda layout: layout.score, reverse=True)[:beam_width]
-    return max(beam, key=lambda layout: layout.score)
+    # Commit the strongest partial layout, then use fast Largest/Best-Fit/BLF
+    # packing for all remaining cartons.  This prevents a Beam explosion on
+    # detailed loads with thousands of cartons.
+    best = max(beam, key=lambda layout: layout.score)
+    for carton in cartons[beam_limit:]:
+        best = _greedy_place(best, carton, container, config, total, orientation_cache)
+    best.score = _layout_score(best, container, total)
+    return best
 
 
 def pack_container(container: ContainerSpec, items, role="Selected", config=None):

@@ -114,6 +114,8 @@ if 'max_additional_containers' not in st.session_state:
     st.session_state.max_additional_containers = 10
 if 'contact_compaction' not in st.session_state:
     st.session_state.contact_compaction = True
+if 'optimization_profile' not in st.session_state:
+    st.session_state.optimization_profile = "balanced"
 
 # Load persisted custom containers configuration
 if 'custom_containers' not in st.session_state:
@@ -129,7 +131,7 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
-PACKING_ENGINE_VERSION = "20260714-beam-search-free-space-v1"
+PACKING_ENGINE_VERSION = "20260714-hybrid-greedy-local-beam-v1"
 
 
 @st.cache_data(show_spinner=False)
@@ -1003,7 +1005,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
 
     st.write("---")
     st.subheader("Loading Configuration")
-    config_cols = st.columns(6)
+    config_cols = st.columns(7)
     with config_cols[0]:
         direction_labels = {
             "inside_out": "Inside to door",
@@ -1078,6 +1080,20 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             step=0.05,
             help="Minimum footprint overlap required before one package is considered supported by another."
         )
+    with config_cols[6]:
+        profile_labels = {
+            "fast": "Fast (about 2s)",
+            "balanced": "Balanced (about 10s)",
+            "maximum": "Maximum (up to 60s)",
+        }
+        profile_options = list(profile_labels)
+        st.session_state.optimization_profile = st.selectbox(
+            "Optimization speed",
+            profile_options,
+            index=profile_options.index(st.session_state.optimization_profile),
+            format_func=lambda value: profile_labels[value],
+            help="The engine automatically adjusts Beam width, search variants, and local repacking."
+        )
 
     # Step 2 navigation controls
     st.write("---")
@@ -1138,6 +1154,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 "max_additional_containers": int(st.session_state.max_additional_containers),
                 "minimum_support_ratio": float(st.session_state.minimum_support_ratio),
                 "contact_compaction": bool(st.session_state.contact_compaction),
+                "optimization_profile": st.session_state.optimization_profile,
             }
             calculation_signature = hashlib.sha256(
                 json.dumps(calculation_input, sort_keys=True, default=str).encode("utf-8")
@@ -1160,6 +1177,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                         max_additional_containers=int(st.session_state.max_additional_containers),
                         minimum_support_ratio=float(st.session_state.minimum_support_ratio),
                         contact_compaction=bool(st.session_state.contact_compaction),
+                        optimization_profile=st.session_state.optimization_profile,
                     )
                     try:
                         plan = calculate_loading_cached(

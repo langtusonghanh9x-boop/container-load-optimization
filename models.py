@@ -115,3 +115,7 @@ class LoadingConfig:
     # basic UI so normal users get the complete global search by default.
     packing_sequence: str = "largest_volume_first"
     search_limit: int = 35
+    beam_width: int = 12
+    beam_carton_limit: int = 20
+    optimization_profile: str = "balanced"
+    time_budget_seconds: float = 60.0

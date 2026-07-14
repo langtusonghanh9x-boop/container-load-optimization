@@ -1,5 +1,6 @@
 from dataclasses import replace
 from math import sqrt
+from time import monotonic
 
 from .manager import ContainerManager
 from .models import LoadingConfig, LoadingPlan
@@ -63,6 +64,58 @@ def _candidate_configs(items, config):
     return candidates[:max(1, int(getattr(config, "search_limit", len(candidates))))]
 
 
+def _replace_config(config, **updates):
+    """Replace only fields supported by the deployed LoadingConfig version."""
+    fields = getattr(config, "__dataclass_fields__", {})
+    return replace(config, **{key: value for key, value in updates.items() if key in fields})
+
+
+def _hybrid_settings(carton_count, profile):
+    if carton_count < 100:
+        adaptive_width = 32
+    elif carton_count <= 500:
+        adaptive_width = 16
+    elif carton_count <= 2000:
+        adaptive_width = 8
+    elif carton_count <= 5000:
+        adaptive_width = 6
+    else:
+        adaptive_width = 4
+    profiles = {
+        "fast": (2.0, min(adaptive_width, 8), 12, 1, 0.95),
+        "balanced": (10.0, adaptive_width, 20, 9, 0.97),
+        "maximum": (60.0, adaptive_width, 40, 35, 0.98),
+    }
+    budget, width, prefix, variants, target = profiles.get(profile, profiles["balanced"])
+    return {"budget": budget, "beam_width": width, "beam_prefix": prefix, "variants": variants, "target": target}
+
+
+def _local_candidate_configs(items, config, settings):
+    """Only use Beam for selected sequences/heuristics after fast packing."""
+    ordered = any(item.loading_order is not None for item in items)
+    profile = getattr(config, "optimization_profile", "balanced")
+    if ordered:
+        sequences = ("loading_order",)
+    elif profile == "fast":
+        sequences = ("largest_volume_first",)
+    elif profile == "balanced":
+        sequences = ("largest_volume_first", "largest_base_first", "heaviest_first")
+    else:
+        sequences = SEQUENCES
+    if profile == "fast":
+        heuristics = ("best_volume_fit",)
+    elif profile == "balanced":
+        heuristics = ("bottom_left_fill", "best_volume_fit", "best_contact_area")
+    else:
+        heuristics = PLACEMENT_HEURISTICS
+    candidates = [
+        _replace_config(config, packing_sequence=sequence, placement_strategy=heuristic,
+                        beam_width=settings["beam_width"], beam_carton_limit=settings["beam_prefix"])
+        for sequence in sequences for heuristic in heuristics
+    ]
+    return candidates[:settings["variants"]]
+
+
 def _incremental_repacking(spec, items, role, packed, remaining, config):
     """Retry a near-full layout with a wider Beam before committing it.
 
@@ -72,12 +125,12 @@ def _incremental_repacking(spec, items, role, packed, remaining, config):
     """
     if packed.volume_pct >= 98.0:
         return packed, remaining
-    repack_updates = {"placement_strategy": "best_free_space_reduction"}
+    repack_updates = {"placement_strategy": "best_free_space_reduction", "beam_carton_limit": min(15, len(items))}
     # Keep cloud deployments compatible with a previously cached/packaged
     # LoadingConfig that does not yet expose the optional Beam setting.
     if "beam_width" in getattr(config, "__dataclass_fields__", {}):
         repack_updates["beam_width"] = max(int(getattr(config, "beam_width", 12)), 24)
-    repack_config = replace(config, **repack_updates)
+    repack_config = _replace_config(config, **repack_updates)
     repacked, repacked_remaining = pack_container(spec, items, role=role, config=repack_config)
     if _candidate_score(repacked) > _candidate_score(packed):
         return repacked, repacked_remaining
@@ -91,13 +144,35 @@ def optimize_single_container(spec, cartons, role="Selected", config=None):
     full sequence × orientation × placement-heuristic search space.
     """
     config = config or LoadingConfig()
-    candidate_plans = []
-    for candidate_config in _candidate_configs(cartons, config):
-        packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
-        score = _candidate_score(packed)
-        candidate_plans.append((score, packed, remaining, candidate_config))
+    settings = _hybrid_settings(len(cartons), getattr(config, "optimization_profile", "balanced"))
+    deadline = monotonic() + min(float(getattr(config, "time_budget_seconds", settings["budget"])), settings["budget"])
+
+    # Stage 1: fast initial Largest-First / Best-Fit / Bottom-Left-Fill pass.
+    initial_config = _replace_config(
+        config,
+        packing_sequence="loading_order" if any(item.loading_order is not None for item in cartons) else "largest_volume_first",
+        placement_strategy="bottom_left_fill",
+        beam_width=1,
+        beam_carton_limit=0,
+    )
+    initial_packed, initial_remaining = pack_container(spec, cartons, role=role, config=initial_config)
+    candidate_plans = [(_candidate_score(initial_packed), initial_packed, initial_remaining, initial_config)]
+
+    # Stage 2 detects a bad region through low fill or low quality score.
+    # Stage 3 applies Beam only to the leading difficult cartons, never to the
+    # full detailed load.  Each result is compared before it can be committed.
+    needs_local_search = initial_packed.volume_pct < settings["target"] * 100 or len(initial_remaining) > 0
+    if needs_local_search:
+        for candidate_config in _local_candidate_configs(cartons, config, settings):
+            if monotonic() >= deadline:
+                break
+            packed, remaining = pack_container(spec, cartons, role=role, config=candidate_config)
+            candidate_plans.append((_candidate_score(packed), packed, remaining, candidate_config))
     _, best_packed, best_remaining, best_config = max(candidate_plans, key=lambda candidate: candidate[0])
-    return _incremental_repacking(spec, cartons, role, best_packed, best_remaining, best_config)
+    # Stage 4: incremental repack is a rollback-safe final local improvement.
+    if monotonic() < deadline and getattr(config, "optimization_profile", "balanced") != "fast":
+        return _incremental_repacking(spec, cartons, role, best_packed, best_remaining, best_config)
+    return best_packed, best_remaining
 
 
 def _pack_fullest_vehicle(spec, items, role, config):
