@@ -3,7 +3,7 @@ INCH_TO_MM = 25.4
 
 def product_rows_to_cargo_items(products):
     items = []
-    for product in products:
+    for product_row, product in enumerate(products, start=1):
         cargo_type = product.get("cargo_type", "General Cargo")
         length = float(product.get("l", 0))
         width = float(product.get("w", 0))
@@ -17,7 +17,10 @@ def product_rows_to_cargo_items(products):
             from .models import CargoItem
 
             items.append(CargoItem(
-                id=f"{product.get('name', 'Item')} #{index + 1}",
+                # Product names can repeat across imported rows. Include the
+                # source-row number so every physical package remains unique
+                # throughout packing and leftover accounting.
+                id=f"row-{product_row}:{product.get('name', 'Item')} #{index + 1}",
                 name=str(product.get("name", "Item")),
                 length_mm=length,
                 width_mm=width,

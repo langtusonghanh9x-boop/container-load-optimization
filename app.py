@@ -129,8 +129,11 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
+PACKING_ENGINE_VERSION = "20260714-unique-package-ids"
+
+
 @st.cache_data(show_spinner=False)
-def calculate_loading_cached(products, selected_containers, custom_dimensions, selected_quantity, loading_config):
+def calculate_loading_cached(products, selected_containers, custom_dimensions, selected_quantity, loading_config, engine_version):
     items = product_rows_to_cargo_items(products)
     specs = [
         get_container_spec(name, custom_dimensions.get(name))
@@ -1165,6 +1168,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                             custom_dimensions,
                             int(st.session_state.selected_container_quantity),
                             config,
+                            PACKING_ENGINE_VERSION,
                         )
                     except Exception as exc:
                         st.warning(f"Failed to compute loading for selected vehicles, strategy '{strat}': {exc}")
