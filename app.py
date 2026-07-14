@@ -129,7 +129,7 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
-PACKING_ENGINE_VERSION = "20260714-fullest-vehicle-first"
+PACKING_ENGINE_VERSION = "20260714-exhaustive-fill-current-vehicle"
 
 
 @st.cache_data(show_spinner=False)

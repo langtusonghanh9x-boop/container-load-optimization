@@ -29,10 +29,12 @@ def _alternative_configs(items, config):
 def _pack_fullest_vehicle(spec, items, role, config):
     """Fill one vehicle as much as possible before moving to the next one."""
     best_packed, best_remaining = pack_container(spec, items, role=role, config=config)
-    # A near-full volume or payload does not need slower alternative searches.
-    if not best_remaining or max(best_packed.volume_pct, best_packed.weight_pct) >= 92:
+    if not best_remaining:
         return best_packed, best_remaining
 
+    # Always compare every applicable layout before handing any cargo to the
+    # next vehicle. This enforces the fill-current-vehicle-first rule rather
+    # than accepting a merely "good enough" first arrangement.
     for alternative in _alternative_configs(items, config):
         packed, remaining = pack_container(spec, items, role=role, config=alternative)
         if _utilization_score(packed) > _utilization_score(best_packed):
