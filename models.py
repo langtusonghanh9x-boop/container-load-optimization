@@ -111,3 +111,7 @@ class LoadingConfig:
     max_additional_containers: int = 10
     minimum_support_ratio: float = 0.65
     contact_compaction: bool = True
+    # Internal optimizer controls.  They are intentionally kept out of the
+    # basic UI so normal users get the complete global search by default.
+    packing_sequence: str = "largest_volume_first"
+    search_limit: int = 35

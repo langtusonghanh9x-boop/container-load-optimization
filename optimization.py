@@ -1,44 +1,71 @@
 from dataclasses import replace
+from math import sqrt
 
 from .manager import ContainerManager
 from .models import LoadingConfig, LoadingPlan
 from .packing import can_fit_item, pack_container
 
 
-def _utilization_score(packed):
-    """Prefer the arrangement that fills the current vehicle most completely."""
-    return (packed.volume_pct, packed.weight_pct, packed.package_count)
+SEQUENCES = (
+    "largest_volume_first", "largest_base_first", "heaviest_first",
+    "longest_first", "highest_density_first",
+)
+PLACEMENT_HEURISTICS = (
+    "length_first", "width_first", "bottom_left_fill", "best_contact_area",
+    "best_volume_fit", "lowest_z", "best_free_space_reduction",
+)
 
 
-def _alternative_configs(items, config):
-    """Offer valid fallback layouts without overriding an explicit load order."""
-    alternatives = []
-    alternate_strategy = (
-        "fill_width_before_length"
-        if config.placement_strategy == "stable_floor_first"
-        else "stable_floor_first"
-    )
-    alternatives.append(replace(config, placement_strategy=alternate_strategy))
-    if not any(item.loading_order is not None for item in items):
-        alternate_priority = "large_first" if config.heavy_priority == "heavy_bottom" else "heavy_bottom"
-        alternatives.append(replace(config, heavy_priority=alternate_priority))
-        alternatives.append(replace(config, placement_strategy=alternate_strategy, heavy_priority=alternate_priority))
-    return alternatives
+def _layout_score(packed):
+    """Score a complete vehicle layout with volume utilization dominant."""
+    if not packed.items:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    spec = packed.spec
+    cargo_volume = sum(item.size[0] * item.size[1] * item.size[2] for item in packed.items)
+    max_x = max(item.position[0] + item.size[0] for item in packed.items)
+    max_y = max(item.position[1] + item.size[1] for item in packed.items)
+    max_z = max(item.position[2] + item.size[2] for item in packed.items)
+    compactness = cargo_volume / max(max_x * max_y * max_z, 1.0)
+    support_values = []
+    for item in packed.items:
+        if item.position[2] <= 1e-6:
+            support_values.append(1.0)
+            continue
+        base = max(item.size[0] * item.size[1], 1.0)
+        supported = 0.0
+        for other in packed.items:
+            if other is item or abs(other.position[2] + other.size[2] - item.position[2]) > 1e-6:
+                continue
+            supported += max(0.0, min(item.position[0] + item.size[0], other.position[0] + other.size[0]) - max(item.position[0], other.position[0])) * max(0.0, min(item.position[1] + item.size[1], other.position[1] + other.size[1]) - max(item.position[1], other.position[1]))
+        support_values.append(min(1.0, supported / base))
+    support = sum(support_values) / len(support_values)
+    total_weight = max(packed.cargo_weight_kg, 1e-9)
+    cx = sum((item.position[0] + item.size[0] / 2) * item.cargo.weight_kg for item in packed.items) / total_weight
+    cy = sum((item.position[1] + item.size[1] / 2) * item.cargo.weight_kg for item in packed.items) / total_weight
+    cz = sum((item.position[2] + item.size[2] / 2) * item.cargo.weight_kg for item in packed.items) / total_weight
+    distance = sqrt(((cx - spec.length_mm / 2) / max(spec.length_mm / 2, 1)) ** 2 + ((cy - spec.width_mm / 2) / max(spec.width_mm / 2, 1)) ** 2)
+    balance = max(0.0, 1.0 - distance)
+    low_cog = max(0.0, 1.0 - cz / max(spec.height_mm, 1))
+    planes = len({round(item.position[0], 4) for item in packed.items}) + len({round(item.position[1], 4) for item in packed.items}) + len({round(item.position[2], 4) for item in packed.items})
+    return (packed.volume_pct, compactness, support, balance, low_cog, 1.0 / planes)
+
+
+def _candidate_configs(items, config):
+    """Build every requested sequence/heuristic candidate within search limit."""
+    sequences = ("loading_order",) if any(item.loading_order is not None for item in items) else SEQUENCES
+    candidates = [replace(config, packing_sequence=sequence, placement_strategy=heuristic)
+                  for sequence in sequences for heuristic in PLACEMENT_HEURISTICS]
+    return candidates[:max(1, int(getattr(config, "search_limit", len(candidates))))]
 
 
 def _pack_fullest_vehicle(spec, items, role, config):
-    """Fill one vehicle as much as possible before moving to the next one."""
-    best_packed, best_remaining = pack_container(spec, items, role=role, config=config)
-    if not best_remaining:
-        return best_packed, best_remaining
-
-    # Always compare every applicable layout before handing any cargo to the
-    # next vehicle. This enforces the fill-current-vehicle-first rule rather
-    # than accepting a merely "good enough" first arrangement.
-    for alternative in _alternative_configs(items, config):
-        packed, remaining = pack_container(spec, items, role=role, config=alternative)
-        if _utilization_score(packed) > _utilization_score(best_packed):
-            best_packed, best_remaining = packed, remaining
+    """Search all configured layouts before handing cargo to another vehicle."""
+    best_packed, best_remaining, best_score = None, list(items), None
+    for candidate_config in _candidate_configs(items, config):
+        packed, remaining = pack_container(spec, items, role=role, config=candidate_config)
+        score = _layout_score(packed)
+        if best_score is None or score > best_score:
+            best_packed, best_remaining, best_score = packed, remaining, score
     return best_packed, best_remaining
 
 
