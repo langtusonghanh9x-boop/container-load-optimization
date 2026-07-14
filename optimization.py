@@ -1,17 +1,54 @@
+from dataclasses import replace
+
 from .manager import ContainerManager
 from .models import LoadingConfig, LoadingPlan
 from .packing import can_fit_item, pack_container
+
+
+def _utilization_score(packed):
+    """Prefer the arrangement that fills the current vehicle most completely."""
+    return (packed.volume_pct, packed.weight_pct, packed.package_count)
+
+
+def _alternative_configs(items, config):
+    """Offer valid fallback layouts without overriding an explicit load order."""
+    alternatives = []
+    alternate_strategy = (
+        "fill_width_before_length"
+        if config.placement_strategy == "stable_floor_first"
+        else "stable_floor_first"
+    )
+    alternatives.append(replace(config, placement_strategy=alternate_strategy))
+    if not any(item.loading_order is not None for item in items):
+        alternate_priority = "large_first" if config.heavy_priority == "heavy_bottom" else "heavy_bottom"
+        alternatives.append(replace(config, heavy_priority=alternate_priority))
+        alternatives.append(replace(config, placement_strategy=alternate_strategy, heavy_priority=alternate_priority))
+    return alternatives
+
+
+def _pack_fullest_vehicle(spec, items, role, config):
+    """Fill one vehicle as much as possible before moving to the next one."""
+    best_packed, best_remaining = pack_container(spec, items, role=role, config=config)
+    # A near-full volume or payload does not need slower alternative searches.
+    if not best_remaining or max(best_packed.volume_pct, best_packed.weight_pct) >= 92:
+        return best_packed, best_remaining
+
+    for alternative in _alternative_configs(items, config):
+        packed, remaining = pack_container(spec, items, role=role, config=alternative)
+        if _utilization_score(packed) > _utilization_score(best_packed):
+            best_packed, best_remaining = packed, remaining
+    return best_packed, best_remaining
 
 
 def _pack_fixed_specs(specs, items, config):
     containers = []
     remaining = list(items)
     for index, spec in enumerate(specs, start=1):
-        packed, remaining = pack_container(
+        packed, remaining = _pack_fullest_vehicle(
             spec,
             remaining,
-            role="Selected" if index == 1 else f"Selected {index}",
-            config=config,
+            "Selected" if index == 1 else f"Selected {index}",
+            config,
         )
         containers.append(packed)
         if not remaining:
@@ -24,11 +61,11 @@ def _pack_repeating_spec(spec, items, config):
     remaining = list(items)
     max_additional = getattr(config, "max_additional_containers", 10)
     while remaining and len(containers) < max_additional:
-        packed, next_remaining = pack_container(
+        packed, next_remaining = _pack_fullest_vehicle(
             spec,
             remaining,
-            role=f"Additional {len(containers) + 1}",
-            config=config,
+            f"Additional {len(containers) + 1}",
+            config,
         )
         if not packed.items or len(next_remaining) == len(remaining):
             return None, remaining
