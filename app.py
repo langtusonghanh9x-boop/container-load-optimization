@@ -424,7 +424,8 @@ if st.session_state.current_tab == "PRODUCTS":
         "Length": ["LENGTH (MM)", "LENGTH", "LEN", "L (MM)"],
         "Width": ["WIDTH (MM)", "WIDTH", "WID", "W (MM)"],
         "Height": ["HEIGHT (MM)", "HEIGHT", "HEI", "H (MM)"],
-        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"]
+        "Weight": ["WEIGHT (KG)", "GROSS WEIGHT", "G.W", "GW", "NET WEIGHT", "N.W", "NW", "WEIGHT", "WT"],
+        "Order": ["ORDER (INSIDE → OUT)", "ORDER (INSIDE OUT)", "ORDER", "LOADING ORDER", "LOAD ORDER"]
     }
 
     def find_column(columns, possible_names):
@@ -523,12 +524,16 @@ if st.session_state.current_tab == "PRODUCTS":
 
         return best_df if best_df is not None else pd.DataFrame()
     def clear_product_input_state():
-        prefixes = ("name_", "type_", "l_", "w_", "h_", "wt_", "qty_", "color_", "order_", "del_")
+        prefixes = (
+            "name_", "type_", "l_", "w_", "h_", "wt_", "qty_", "color_", "order_", "del_",
+            "settings_", "show_settings_", "orientation_", "layers_enabled_", "max_layers_",
+            "mass_enabled_", "max_mass_", "height_enabled_", "max_height_", "disable_stacking_",
+        )
         for key in list(st.session_state.keys()):
             if key.startswith(prefixes):
                 del st.session_state[key]
 
-    IMPORT_CODE_VERSION = "product-import-v10"
+    IMPORT_CODE_VERSION = "product-import-v11"
 
     if uploaded_file is not None:
         file_hash = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
@@ -546,6 +551,7 @@ if st.session_state.current_tab == "PRODUCTS":
                 col_hei = find_column(df.columns, COLUMN_ALIASES["Height"])
                 col_wt = find_column(df.columns, COLUMN_ALIASES["Weight"])
                 col_qty = find_column(df.columns, COLUMN_ALIASES["Quantity"])
+                col_order = find_column(df.columns, COLUMN_ALIASES["Order"])
 
                 def average_text_length(column):
                     values = []
@@ -614,6 +620,15 @@ if st.session_state.current_tab == "PRODUCTS":
                     number = float(match.group(0))
                     return int(number) if number > 0 else default
 
+                def parse_loading_order(value):
+                    if is_blank(value):
+                        return None
+                    match = re.search(r"\d+", str(value).replace(",", ""))
+                    if not match:
+                        return None
+                    order = int(match.group(0))
+                    return order if 1 <= order <= 100 else None
+
                 data_columns = [col_desc, col_len, col_wid, col_hei, col_wt, col_qty]
 
                 for idx, row in df.iterrows():
@@ -633,7 +648,8 @@ if st.session_state.current_tab == "PRODUCTS":
                         "wt": parse_number(row[col_wt]),
                         "qty": parse_number(row[col_qty]),
                         "color": colors[len(imported_products) % len(colors)],
-                        "cargo_type": "General Cargo"
+                        "cargo_type": "General Cargo",
+                        "loading_order": parse_loading_order(row[col_order]) if col_order is not None else None,
                     })
                 if not imported_products:
                     st.warning("No valid product rows were found in the uploaded file.")
@@ -650,7 +666,7 @@ if st.session_state.current_tab == "PRODUCTS":
 
     if st.session_state.get("import_success_message"):
         st.success(st.session_state.import_success_message)
-    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8, col_h9 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.5])
+    col_h1, col_h_type, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7, col_h8, col_h9, col_h10 = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.45, 0.45])
     with col_h1: st.markdown("**Product Name**")
     with col_h_type: st.markdown("**Cargo Type**")
     with col_h2: st.markdown("**Length**")
@@ -660,7 +676,8 @@ if st.session_state.current_tab == "PRODUCTS":
     with col_h6: st.markdown("**Quantity**")
     with col_h7: st.markdown("**Color**")
     with col_h8: st.markdown("**Order (Inside → Out)**")
-    with col_h9: st.markdown("**Del**")
+    with col_h9: st.markdown("**Set**")
+    with col_h10: st.markdown("**Del**")
 
     # Update product rows while keeping Streamlit state stable
     temp_list = []
@@ -669,7 +686,7 @@ if st.session_state.current_tab == "PRODUCTS":
     
     product_key_version = st.session_state.product_list_version
     for i, prod in enumerate(st.session_state.product_list):
-        cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.5])
+        cols = st.columns([2.3, 1.35, 1.05, 1.05, 1.05, 1.05, 1, 0.85, 0.7, 0.45, 0.45])
         name = cols[0].text_input("", value=prod["name"], key=f"name_{product_key_version}_{i}", label_visibility="collapsed")
         cargo_type_options = ["General Cargo", "Lumber Bundle", *CARGO_TYPE_OPTIONS]
         current_cargo_type = prod.get("cargo_type", "General Cargo")
@@ -693,7 +710,45 @@ if st.session_state.current_tab == "PRODUCTS":
         if order_text and loading_order is None:
             invalid_order_rows.append(i + 1)
         
-        if cols[9].button("🗑️", key=f"del_{product_key_version}_{i}"):
+        settings_key = f"show_settings_{product_key_version}_{i}"
+        if cols[9].button("⚙️", key=f"settings_{product_key_version}_{i}"):
+            st.session_state[settings_key] = not st.session_state.get(settings_key, False)
+
+        tilt_to_length = prod.get("tilt_to_length", False)
+        tilt_to_width = prod.get("tilt_to_width", False)
+        max_layers = prod.get("max_layers")
+        max_stack_mass = prod.get("max_stack_mass_kg")
+        max_stack_height = prod.get("max_stack_height_mm")
+        disable_stacking = prod.get("disable_stacking", False)
+        if st.session_state.get(settings_key, False):
+            st.caption(f"Packing settings — {name}")
+            setting_cols = st.columns(5)
+            orientation_options = ["Keep orientation", "Tilt to length", "Tilt to width", "Tilt both ways"]
+            current_orientation = (
+                "Tilt both ways" if tilt_to_length and tilt_to_width
+                else "Tilt to length" if tilt_to_length
+                else "Tilt to width" if tilt_to_width
+                else "Keep orientation"
+            )
+            orientation = setting_cols[0].selectbox(
+                "Orientation", orientation_options,
+                index=orientation_options.index(current_orientation),
+                key=f"orientation_{product_key_version}_{i}",
+            )
+            tilt_to_length = orientation in ("Tilt to length", "Tilt both ways")
+            tilt_to_width = orientation in ("Tilt to width", "Tilt both ways")
+            use_layers = setting_cols[1].checkbox("Layers Count", value=max_layers is not None, key=f"layers_enabled_{product_key_version}_{i}")
+            layer_value = setting_cols[1].number_input("Maximum layers", min_value=1, max_value=100, value=int(max_layers or 1), step=1, disabled=not use_layers, key=f"max_layers_{product_key_version}_{i}")
+            max_layers = int(layer_value) if use_layers else None
+            use_mass = setting_cols[2].checkbox("Mass", value=max_stack_mass is not None, key=f"mass_enabled_{product_key_version}_{i}")
+            mass_value = setting_cols[2].number_input("Maximum load (kg)", min_value=0.0, value=float(max_stack_mass or 0), step=1.0, disabled=not use_mass, key=f"max_mass_{product_key_version}_{i}")
+            max_stack_mass = mass_value if use_mass else None
+            use_height = setting_cols[3].checkbox("Height", value=max_stack_height is not None, key=f"height_enabled_{product_key_version}_{i}")
+            height_value = setting_cols[3].number_input("Maximum height (mm)", min_value=1.0, value=float(max_stack_height or 1), step=10.0, disabled=not use_height, key=f"max_height_{product_key_version}_{i}")
+            max_stack_height = height_value if use_height else None
+            disable_stacking = setting_cols[4].checkbox("Disable stacking", value=disable_stacking, key=f"disable_stacking_{product_key_version}_{i}")
+
+        if cols[10].button("🗑️", key=f"del_{product_key_version}_{i}"):
             to_delete = i
             
         temp_list.append({
@@ -707,12 +762,12 @@ if st.session_state.current_tab == "PRODUCTS":
             "cargo_type": cargo_type,
             "shape": prod.get("shape", "box"),
             "loading_order": loading_order,
-            "tilt_to_length": prod.get("tilt_to_length", False),
-            "tilt_to_width": prod.get("tilt_to_width", False),
-            "max_layers": prod.get("max_layers"),
-            "max_stack_mass_kg": prod.get("max_stack_mass_kg"),
-            "max_stack_height_mm": prod.get("max_stack_height_mm"),
-            "disable_stacking": prod.get("disable_stacking", False),
+            "tilt_to_length": tilt_to_length,
+            "tilt_to_width": tilt_to_width,
+            "max_layers": max_layers,
+            "max_stack_mass_kg": max_stack_mass,
+            "max_stack_height_mm": max_stack_height,
+            "disable_stacking": disable_stacking,
         })
 
     if to_delete is not None:
@@ -1171,11 +1226,21 @@ elif st.session_state.current_tab == "STUFFING RESULT":
     metric_cols = st.columns(5)
     selected_vehicle_is_truck = selected_container_view.startswith("Truck ")
     used_vehicle_label = "Trucks Used" if selected_vehicle_is_truck else "Containers Used"
+    processed_count = loading_plan.loaded_count + loading_plan.leftover_count
     metric_cols[0].metric(used_vehicle_label, len(loading_plan.containers))
-    metric_cols[1].metric("Loaded / Total", f"{loading_plan.loaded_count}/{loading_plan.requested_count}")
+    metric_cols[1].metric(
+        "Loaded / Total",
+        f"{loading_plan.loaded_count}/{loading_plan.requested_count}",
+        help="Every requested package is processed. Packages that cannot be loaded are counted under Unloaded.",
+    )
     metric_cols[2].metric("Unloaded", loading_plan.leftover_count)
     metric_cols[3].metric("Total Volume", f"{loading_plan.total_volume_m3:.2f} m3")
     metric_cols[4].metric("Total Weight", f"{loading_plan.total_weight_kg:.2f} kg")
+
+    if processed_count != loading_plan.requested_count:
+        st.error("The loading plan did not process every requested package. Please recalculate the plan.")
+    else:
+        st.caption(f"Processed all {processed_count} requested packages: {loading_plan.loaded_count} loaded and {loading_plan.leftover_count} unloaded.")
 
     for message in loading_plan.suggestions:
         st.success(message)
