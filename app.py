@@ -118,6 +118,10 @@ if 'optimization_profile' not in st.session_state:
     st.session_state.optimization_profile = "balanced"
 if 'packing_pattern' not in st.session_state:
     st.session_state.packing_pattern = "balanced"
+if 'vehicle_completion_target_pct' not in st.session_state:
+    st.session_state.vehicle_completion_target_pct = 90
+if 'recovery_placement_count' not in st.session_state:
+    st.session_state.recovery_placement_count = 12
 
 # Load persisted custom containers configuration
 if 'custom_containers' not in st.session_state:
@@ -133,7 +137,7 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
-PACKING_ENGINE_VERSION = "20260716-configurable-packing-patterns-v1"
+PACKING_ENGINE_VERSION = "20260716-vehicle-completion-engine-v1"
 
 
 @st.cache_data(show_spinner=False)
@@ -1116,6 +1120,20 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             help="Changes priorities, scoring, search depth and local improvement within the same engine."
         )
 
+    completion_cols = st.columns(2)
+    with completion_cols[0]:
+        st.session_state.vehicle_completion_target_pct = st.slider(
+            "Vehicle recovery threshold (%)", min_value=50, max_value=99,
+            value=int(st.session_state.vehicle_completion_target_pct),
+            help="Below this utilization the engine must attempt Recovery Mode before opening another vehicle."
+        )
+    with completion_cols[1]:
+        st.session_state.recovery_placement_count = st.number_input(
+            "Recovery placements", min_value=5, max_value=20,
+            value=int(st.session_state.recovery_placement_count), step=1,
+            help="Recent cartons temporarily undone for local recovery before a vehicle is declared complete."
+        )
+
     # Step 2 navigation controls
     st.write("---")
     col_nav1, col_nav2, _ = st.columns([1.5, 2, 8.5])
@@ -1177,6 +1195,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 "contact_compaction": bool(st.session_state.contact_compaction),
                 "optimization_profile": st.session_state.optimization_profile,
                 "packing_pattern": st.session_state.packing_pattern,
+                "vehicle_completion_target_pct": int(st.session_state.vehicle_completion_target_pct),
+                "recovery_placement_count": int(st.session_state.recovery_placement_count),
             }
             calculation_signature = hashlib.sha256(
                 json.dumps(calculation_input, sort_keys=True, default=str).encode("utf-8")
@@ -1201,6 +1221,8 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                         contact_compaction=bool(st.session_state.contact_compaction),
                         optimization_profile=st.session_state.optimization_profile,
                         packing_pattern=st.session_state.packing_pattern,
+                        vehicle_completion_target_pct=float(st.session_state.vehicle_completion_target_pct),
+                        recovery_placement_count=int(st.session_state.recovery_placement_count),
                     )
                     try:
                         plan = calculate_loading_cached(

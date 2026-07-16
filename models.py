@@ -121,3 +121,6 @@ class LoadingConfig:
     time_budget_seconds: float = 60.0
     parallel_search: bool = True
     packing_pattern: str = "balanced"
+    vehicle_completion_target_pct: float = 90.0
+    recovery_placement_count: int = 12
+    incremental_repack_count: int = 5

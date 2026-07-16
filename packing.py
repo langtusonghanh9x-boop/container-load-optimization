@@ -302,11 +302,12 @@ class _FreeSpaceIndex:
     by their three dimension classes; each bucket has a low-Z / best-fit heap.
     Entries are invalidated lazily when a space is split.
     """
-    def __init__(self, spaces=()):
+    def __init__(self, spaces=(), max_spaces=FAST_FREE_SPACE_LIMIT):
         self.spaces = {}
         self.buckets = {}
         self.global_heap = []
         self.next_id = 0
+        self.max_spaces = max_spaces
         for space in spaces:
             self.add(space)
 
@@ -351,6 +352,24 @@ class _FreeSpaceIndex:
             heappush(self.global_heap, entry)
         return selected
 
+    def all_fit_candidates(self, size):
+        """Exhaustive feasibility iterator used by Vehicle Completion mode."""
+        return [
+            (ident, space) for ident, space in self.spaces.items()
+            if size[0] <= space.length + 1e-6
+            and size[1] <= space.width + 1e-6
+            and size[2] <= space.height + 1e-6
+        ]
+
+    def find_exact(self, position, size):
+        for ident, space in self.spaces.items():
+            if (abs(space.x - position[0]) < 1e-6 and abs(space.y - position[1]) < 1e-6
+                    and abs(space.z - position[2]) < 1e-6
+                    and size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6
+                    and size[2] <= space.height + 1e-6):
+                return ident, space
+        return None
+
     def split(self, ident, size):
         space = self.spaces.get(ident)
         if space is None:
@@ -362,17 +381,20 @@ class _FreeSpaceIndex:
         self.add(_FreeSpace(space.x, space.y, space.z + dz, dx, dy, space.height - dz))
         # Bound memory for highly detailed loads.  Discard only the least
         # reachable high-Z fragments; current low-Z regions stay indexed.
-        if len(self.spaces) > int(FAST_FREE_SPACE_LIMIT * 1.15):
-            keep = sorted(self.spaces, key=lambda key: self._priority(self.spaces[key]))[:FAST_FREE_SPACE_LIMIT]
+        if self.max_spaces is not None and len(self.spaces) > int(self.max_spaces * 1.15):
+            keep = sorted(self.spaces, key=lambda key: self._priority(self.spaces[key]))[:self.max_spaces]
             self.spaces = {key: self.spaces[key] for key in keep}
 
 
 class _MutablePackingState:
     """Incremental state: no layout copies while greedy packing proceeds."""
-    def __init__(self, container, spaces=None, items=None):
+    def __init__(self, container, spaces=None, items=None, exhaustive=False):
         self.container = container
         self.items = list(items or ())
-        self.free = _FreeSpaceIndex(spaces or [_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])
+        self.free = _FreeSpaceIndex(
+            spaces or [_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))],
+            max_spaces=None if exhaustive else FAST_FREE_SPACE_LIMIT,
+        )
         self.weight = sum(item.cargo.weight_kg for item in self.items)
         self.used_volume = sum(item.size[0] * item.size[1] * item.size[2] for item in self.items)
         self.top_surfaces = {}
@@ -691,16 +713,173 @@ def beam_search_pack(container, cartons, config):
     return result
 
 
+def _completion_candidate_score(carton, space, size, state, config):
+    """Score one legal placement without allocating a trial full layout."""
+    heuristic = getattr(config, "placement_strategy", "bottom_left_fill")
+    placement = _heuristic_key((space, size), heuristic)
+    pattern = get_pattern(getattr(config, "packing_pattern", "balanced"))
+    fill_weight = pattern.weights[0]
+    volume = size[0] * size[1] * size[2] / max(
+        state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0
+    )
+    # Larger legal cartons first reduces unusable residual voids.  The tuple
+    # makes ties deterministic by the configured placement priority.
+    return (volume * fill_weight, *placement)
+
+
+def _find_best_completion_candidate(state, remaining, config, orientation_cache, banned=()):
+    """Exhaustively test every remaining carton, orientation and free space."""
+    best = None
+    banned = set(banned)
+    for carton_index, carton in enumerate(remaining):
+        if state.weight + carton.weight_kg > state.container.max_weight_kg + 1e-6:
+            continue
+        orientations = orientation_cache.get(carton.id)
+        if orientations is None:
+            orientations = _cargo_orientations(carton)
+            orientation_cache[carton.id] = orientations
+        for size in orientations:
+            # Completion mode intentionally bypasses the fast candidate cap.
+            for ident, space in state.free.all_fit_candidates(size):
+                signature = (carton.id, round(space.x, 3), round(space.y, 3), round(space.z, 3), size)
+                if signature in banned:
+                    continue
+                if not _support_allowed_indexed(state, carton, (space.x, space.y, space.z), size, config):
+                    continue
+                score = _completion_candidate_score(carton, space, size, state, config)
+                candidate = (score, -carton_index, carton_index, ident, space, size)
+                if best is None or candidate[:2] > best[:2]:
+                    best = candidate
+    return best
+
+
+def _completion_score(state, config):
+    capacity = max(state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0)
+    fill = state.used_volume / capacity
+    # Exact used volume is dominant; fewer active voids resolves equal fills.
+    return (fill, -len(state.free.spaces), -len(state.items))
+
+
+def _rebuild_completion_state(container, history):
+    """Rebuild only a checkpoint and its tail, never the entire vehicle plan."""
+    state = _MutablePackingState(container, exhaustive=True)
+    for carton, position, size in history:
+        found = state.free.find_exact(position, size)
+        if found is None:
+            return None
+        ident, space = found
+        state.place(carton, ident, space, size)
+    return state
+
+
+def _complete_until_stalled(state, remaining, history, config, orientation_cache, banned=()):
+    """Place the globally best legal carton, then retry all remaining cartons."""
+    remaining = list(remaining)
+    history = list(history)
+    while remaining:
+        candidate = _find_best_completion_candidate(state, remaining, config, orientation_cache, banned)
+        if candidate is None:
+            break
+        _, _, carton_index, ident, space, size = candidate
+        carton = remaining.pop(carton_index)
+        state.place(carton, ident, space, size)
+        history.append((carton, (space.x, space.y, space.z), size))
+    return state, remaining, history
+
+
+def _recover_tail(container, state, remaining, history, config, orientation_cache, count):
+    """Undo a bounded tail, search alternative placements, and rollback safely."""
+    count = min(max(1, count), len(history))
+    if not count:
+        return None
+    checkpoint, tail = history[:-count], history[-count:]
+    trial = _rebuild_completion_state(container, checkpoint)
+    if trial is None:
+        return None
+    retry_cartons = list(remaining) + [carton for carton, _, _ in tail]
+    banned = {(carton.id, round(position[0], 3), round(position[1], 3), round(position[2], 3), size)
+              for carton, position, size in tail}
+    trial, retry_remaining, retry_history = _complete_until_stalled(
+        trial, retry_cartons, checkpoint, config, orientation_cache, banned
+    )
+    if _completion_score(trial, config) > _completion_score(state, config):
+        return trial, retry_remaining, retry_history
+    return None
+
+
+def vehicle_completion_pack(container, cartons, config):
+    """Commercial vehicle-completion state machine.
+
+    A vehicle is only returned after an exhaustive legal-placement pass, local
+    recovery and incremental repacking all fail to create another placement.
+    """
+    state = _MutablePackingState(container, exhaustive=True)
+    remaining = list(sort_items_for_loading(cartons, config))
+    history = []
+    orientations = {}
+    local_attempted = False
+    incremental_attempted = False
+
+    while True:
+        state, remaining, history = _complete_until_stalled(state, remaining, history, config, orientations)
+        if not remaining:
+            break
+
+        # Phase 0: below target, recover a configurable recent placement tail
+        # before a second vehicle is even considered.
+        utilization = state.used_volume / max(container.length_mm * container.width_mm * container.height_mm, 1.0) * 100
+        if utilization < float(getattr(config, "vehicle_completion_target_pct", 90.0)):
+            recovered = _recover_tail(
+                container, state, remaining, history, config, orientations,
+                int(getattr(config, "recovery_placement_count", 12)),
+            )
+            if recovered is not None:
+                state, remaining, history = recovered
+                local_attempted = True
+                continue
+
+        # Local optimization is deliberately bounded to cartons around the
+        # latest fragmented/void region (the recent history tail).
+        if not local_attempted:
+            recovered = _recover_tail(
+                container, state, remaining, history, config, orientations,
+                min(8, int(getattr(config, "recovery_placement_count", 12))),
+            )
+            local_attempted = True
+            if recovered is not None:
+                state, remaining, history = recovered
+                continue
+
+        # Incremental repacking is smaller again and never rebuilds all cargo.
+        if not incremental_attempted:
+            recovered = _recover_tail(
+                container, state, remaining, history, config, orientations,
+                int(getattr(config, "incremental_repack_count", 5)),
+            )
+            incremental_attempted = True
+            if recovered is not None:
+                state, remaining, history = recovered
+                continue
+
+        # All cartons/orientations/free-spaces were searched, then both local
+        # phases and their retry passes completed without a legal placement.
+        break
+
+    result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
+    result.score = _layout_score(result, container, len(cartons), config)
+    return result, remaining
+
+
 def pack_container(container: ContainerSpec, items, role="Selected", config=None):
-    """Optimize a single vehicle with Beam Search and commit only its best layout."""
+    """Complete one vehicle before allowing the caller to create another."""
     config = config or LoadingConfig()
-    layout = beam_search_pack(container, sort_items_for_loading(items, config), config)
+    layout, completion_leftovers = vehicle_completion_pack(container, items, config)
     packed = layout.items
     if getattr(config, "load_direction", "inside_out") == "door_to_inside":
         packed = [PackedItem(item.cargo, _normalize_position(item.position, item.size, container, config), item.size) for item in packed]
 
     packed_ids = {item.cargo.id for item in packed}
-    leftovers = [item for item in items if item.id not in packed_ids]
+    leftovers = [item for item in completion_leftovers if item.id not in packed_ids]
     result = PackedContainer(spec=container, items=packed, role=role)
     # Kept on the plan so the global engine can compare the exact weighted
     # Beam score after each complete candidate layout is generated.
