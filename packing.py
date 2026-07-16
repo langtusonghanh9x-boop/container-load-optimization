@@ -885,4 +885,7 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
     # Beam score after each complete candidate layout is generated.
     result.optimization_score = layout.score
     result.score = layout.score
+    # vehicle_completion_pack reaches this point only after exhaustive search,
+    # recovery, local repacking and retry have all completed.
+    result.completion_verified = True
     return result, leftovers

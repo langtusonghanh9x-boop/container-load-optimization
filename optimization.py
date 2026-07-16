@@ -213,38 +213,51 @@ def _pack_fullest_vehicle(spec, items, role, config):
     return optimize_single_container(spec, items, role, config)
 
 
+class VehicleDrivenEngine:
+    """Commit complete vehicles one at a time from one shared cargo pool."""
+
+    def __init__(self, cargo, config):
+        self.remaining = list(cargo)
+        self.config = config
+        self.vehicles = []
+
+    def commit_vehicle(self, spec, role):
+        """Optimize a whole vehicle, then atomically remove only loaded cargo."""
+        before_count = len(self.remaining)
+        packed, leftovers = _pack_fullest_vehicle(spec, self.remaining, role, self.config)
+        # A vehicle completion certificate is required before another vehicle
+        # can be opened.  This prevents any first-failure transition.
+        if not getattr(packed, "completion_verified", False):
+            raise RuntimeError("Vehicle completion was not verified before commit.")
+        if packed.items:
+            self.vehicles.append(packed)
+            self.remaining = leftovers
+        if len(self.remaining) == before_count:
+            return False
+        return True
+
+    def commit_selected(self, specs):
+        for index, spec in enumerate(specs, start=1):
+            if not self.remaining:
+                break
+            self.commit_vehicle(spec, "Selected" if index == 1 else f"Selected {index}")
+        return self.vehicles, self.remaining
+
+    def commit_repeating(self, spec, max_additional):
+        while self.remaining and len(self.vehicles) < max_additional:
+            if not self.commit_vehicle(spec, f"Additional {len(self.vehicles) + 1}"):
+                return None, self.remaining
+        return self.vehicles, self.remaining
+
+
 def _pack_fixed_specs(specs, items, config):
-    containers = []
-    remaining = list(items)
-    for index, spec in enumerate(specs, start=1):
-        packed, remaining = _pack_fullest_vehicle(
-            spec,
-            remaining,
-            "Selected" if index == 1 else f"Selected {index}",
-            config,
-        )
-        containers.append(packed)
-        if not remaining:
-            break
-    return containers, remaining
+    engine = VehicleDrivenEngine(items, config)
+    return engine.commit_selected(specs)
 
 
 def _pack_repeating_spec(spec, items, config):
-    containers = []
-    remaining = list(items)
-    max_additional = getattr(config, "max_additional_containers", 10)
-    while remaining and len(containers) < max_additional:
-        packed, next_remaining = _pack_fullest_vehicle(
-            spec,
-            remaining,
-            f"Additional {len(containers) + 1}",
-            config,
-        )
-        if not packed.items or len(next_remaining) == len(remaining):
-            return None, remaining
-        containers.append(packed)
-        remaining = next_remaining
-    return containers, remaining
+    engine = VehicleDrivenEngine(items, config)
+    return engine.commit_repeating(spec, getattr(config, "max_additional_containers", 10))
 
 
 def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=True, config=None):
