@@ -116,6 +116,8 @@ if 'contact_compaction' not in st.session_state:
     st.session_state.contact_compaction = True
 if 'optimization_profile' not in st.session_state:
     st.session_state.optimization_profile = "balanced"
+if 'packing_pattern' not in st.session_state:
+    st.session_state.packing_pattern = "balanced"
 
 # Load persisted custom containers configuration
 if 'custom_containers' not in st.session_state:
@@ -131,7 +133,7 @@ if 'minimum_support_ratio' not in st.session_state:
     st.session_state.minimum_support_ratio = 0.65
 
 
-PACKING_ENGINE_VERSION = "20260714-commercial-indexed-hybrid-v2"
+PACKING_ENGINE_VERSION = "20260716-configurable-packing-patterns-v1"
 
 
 @st.cache_data(show_spinner=False)
@@ -1005,7 +1007,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
 
     st.write("---")
     st.subheader("Loading Configuration")
-    config_cols = st.columns(7)
+    config_cols = st.columns(8)
     with config_cols[0]:
         direction_labels = {
             "inside_out": "Inside to door",
@@ -1094,6 +1096,25 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
             format_func=lambda value: profile_labels[value],
             help="The engine automatically adjusts Beam width, search variants, and local repacking."
         )
+    with config_cols[7]:
+        pattern_labels = {
+            "balanced": "Balanced",
+            "fill_width_height": "Fill Width → Height",
+            "fill_length_first": "Fill Length First",
+            "wall_building": "Wall Building",
+            "layer_by_layer": "Layer by Layer",
+            "maximum_utilization": "Maximum Utilization",
+            "weight_balanced": "Weight Balanced",
+            "fast_loading": "Fast Loading",
+        }
+        pattern_options = list(pattern_labels)
+        st.session_state.packing_pattern = st.selectbox(
+            "Packing pattern",
+            pattern_options,
+            index=pattern_options.index(st.session_state.packing_pattern),
+            format_func=lambda value: pattern_labels[value],
+            help="Changes priorities, scoring, search depth and local improvement within the same engine."
+        )
 
     # Step 2 navigation controls
     st.write("---")
@@ -1155,6 +1176,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                 "minimum_support_ratio": float(st.session_state.minimum_support_ratio),
                 "contact_compaction": bool(st.session_state.contact_compaction),
                 "optimization_profile": st.session_state.optimization_profile,
+                "packing_pattern": st.session_state.packing_pattern,
             }
             calculation_signature = hashlib.sha256(
                 json.dumps(calculation_input, sort_keys=True, default=str).encode("utf-8")
@@ -1178,6 +1200,7 @@ elif st.session_state.current_tab == "STUFFING RESULT":
                         minimum_support_ratio=float(st.session_state.minimum_support_ratio),
                         contact_compaction=bool(st.session_state.contact_compaction),
                         optimization_profile=st.session_state.optimization_profile,
+                        packing_pattern=st.session_state.packing_pattern,
                     )
                     try:
                         plan = calculate_loading_cached(

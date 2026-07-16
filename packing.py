@@ -6,6 +6,7 @@ from py3dbp import Bin, Item
 from py3dbp.main import START_POSITION, RotationType, intersect
 
 from .models import CargoItem, ContainerSpec, LoadingConfig, PackedContainer, PackedItem
+from .patterns import get_pattern
 
 
 MAX_ACTIVE_FREE_SPACES = 128
@@ -526,7 +527,7 @@ def _split_free_space(layout, space_index, size):
     return _prune_and_merge_spaces(spaces)
 
 
-def _layout_score(layout, container, total_cartons):
+def _layout_score(layout, container, total_cartons, config):
     """Weighted score used both to retain the Beam top-N and final plans."""
     if not layout.items:
         return 0.0
@@ -548,7 +549,8 @@ def _layout_score(layout, container, total_cartons):
     low_cog = max(0.0, 1.0 - cz / max(container.height_mm, 1))
     fragmentation = 1.0 / max(len(layout.spaces), 1)
     loading_order = len(layout.items) / max(total_cartons, 1)
-    return fill_rate * 55 - void_ratio * 15 + contact_area * 10 + support_ratio * 8 + weight_balance * 5 + low_cog * 3 + fragmentation * 2 + loading_order * 2
+    fill, void, contact, support, balance, cog, fragment, order = get_pattern(getattr(config, "packing_pattern", "balanced")).weights
+    return fill_rate * fill - void_ratio * void + contact_area * contact + support_ratio * support + weight_balance * balance + low_cog * cog + fragmentation * fragment + loading_order * order
 
 
 def _contact_area_for_item(item, items):
@@ -590,6 +592,20 @@ def _heuristic_key(candidate, heuristic):
         return (-min(space.length - size[0], space.width - size[1], space.height - size[2]), -z)
     if heuristic == "best_contact_area":
         return (-(x + y + z), -z)
+    if heuristic == "fill_width_height":
+        # Width (Y), then vertical completion (Z), then container length (X).
+        return (-y, -z, -x)
+    if heuristic == "fill_length_first":
+        return (-x, -y, -z)
+    if heuristic == "wall_building":
+        # Hold X constant while completing the Y/Z wall.
+        return (-x, -z, -y)
+    if heuristic == "layer_by_layer":
+        return (-z, -y, -x)
+    if heuristic == "weight_balanced":
+        center_x = x + size[0] / 2
+        center_y = y + size[1] / 2
+        return (-z, -abs(center_y), -abs(center_x))
     return (-z, -x, -y)
 
 
@@ -612,7 +628,17 @@ def _greedy_place(state, carton, config, orientation_cache=None):
     if not choices:
         return False
     strategy = getattr(config, "placement_strategy", "bottom_left_fill")
-    ident, space, size = max(choices, key=lambda choice: _heuristic_key((choice[1], choice[2]), strategy))
+    if strategy == "weight_balanced":
+        ident, space, size = max(
+            choices,
+            key=lambda choice: (
+                -choice[1].z,
+                -abs(choice[1].x + choice[2][0] / 2 - state.container.length_mm / 2),
+                -abs(choice[1].y + choice[2][1] / 2 - state.container.width_mm / 2),
+            ),
+        )
+    else:
+        ident, space, size = max(choices, key=lambda choice: _heuristic_key((choice[1], choice[2]), strategy))
     state.place(carton, ident, space, size)
     return True
 
@@ -644,7 +670,7 @@ def beam_search_pack(container, cartons, config):
             for index, space, size in candidates:
                 placed = PackedItem(carton, (space.x, space.y, space.z), size)
                 candidate = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size), weight=layout.weight + carton.weight_kg)
-                candidate.score = _layout_score(candidate, container, total)
+                candidate.score = _layout_score(candidate, container, total, config)
                 new_beam.append(candidate)
         # Deduplicate equivalent layouts before retaining the global top-N.
         unique = {}
@@ -661,7 +687,7 @@ def beam_search_pack(container, cartons, config):
     for carton in cartons[beam_limit:]:
         _greedy_place(state, carton, config, orientation_cache)
     result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
-    result.score = _layout_score(result, container, total)
+    result.score = _layout_score(result, container, total, config)
     return result
 
 

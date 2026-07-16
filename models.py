@@ -120,3 +120,4 @@ class LoadingConfig:
     optimization_profile: str = "balanced"
     time_budget_seconds: float = 60.0
     parallel_search: bool = True
+    packing_pattern: str = "balanced"
