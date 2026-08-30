@@ -11,6 +11,8 @@ class CargoItem:
     width_mm: float
     height_mm: float
     weight_kg: float
+    priority: int = 0
+    stackability: int = 100
     color: str = "#7f8c8d"
     cargo_type: str = "General Cargo"
     loading_order: Optional[int] = None
@@ -20,6 +22,7 @@ class CargoItem:
     max_stack_mass_kg: Optional[float] = None
     max_stack_height_mm: Optional[float] = None
     disable_stacking: bool = False
+    allow_overhang: bool = False
     shape: str = "box"
 
     @property
@@ -109,7 +112,7 @@ class LoadingConfig:
     heavy_priority: str = "heavy_bottom"
     placement_strategy: str = "stable_floor_first"
     max_additional_containers: int = 10
-    minimum_support_ratio: float = 0.65
+    minimum_support_ratio: float = 0.70
     contact_compaction: bool = True
     # Internal optimizer controls.  They are intentionally kept out of the
     # basic UI so normal users get the complete global search by default.
@@ -124,3 +127,15 @@ class LoadingConfig:
     vehicle_completion_target_pct: float = 90.0
     recovery_placement_count: int = 12
     incremental_repack_count: int = 5
+    void_filling_enabled: bool = True
+    use_placement_scoring: bool = False
+    score_weights: Dict[str, float] = field(default_factory=lambda: {
+        "contact_area": 0.40,
+        "void_reduction": 0.20,
+        "weight_balance": 0.10,
+        "support_ratio": 0.10,
+        "accessibility": 0.10,
+        "wall_alignment": 0.05,
+        "future_potential": 0.05,
+        "layer_continuity": 0.0,
+    })

@@ -260,7 +260,17 @@ def _pack_repeating_spec(spec, items, config):
     return engine.commit_repeating(spec, getattr(config, "max_additional_containers", 10))
 
 
+def _plan_with_runtime(containers, requested_count, leftover, warnings, suggestions, start, diagnostics=None):
+    runtime = monotonic() - start
+    diagnostics = dict(diagnostics or {})
+    diagnostics["runtime_seconds"] = runtime
+    diagnostics["container_count"] = len(containers)
+    diagnostics["leftover_count"] = len(leftover)
+    return LoadingPlan(containers, requested_count, leftover, warnings, suggestions, diagnostics)
+
+
 def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=True, config=None):
+    start = monotonic()
     config = config or LoadingConfig()
     warnings = []
     suggestions = []
@@ -280,7 +290,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
 
     if not remaining:
         suggestions.append("Hoan thanh: toan bo hang da duoc xep trong so container da chon.")
-        return LoadingPlan(containers, len(items), [], warnings, suggestions)
+        return _plan_with_runtime(containers, len(items), [], warnings, suggestions, start)
 
     impossible_for_catalog = [
         item for item in remaining
@@ -294,7 +304,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     packable_remaining = [item for item in remaining if item not in impossible_for_catalog]
     if not allow_auto_add or not packable_remaining:
         suggestions.append("Can tach hang qua kho, doi phuong tien chuyen dung hoac cap nhat catalog container.")
-        return LoadingPlan(containers, len(items), remaining, warnings, suggestions)
+        return _plan_with_runtime(containers, len(items), remaining, warnings, suggestions, start)
 
     feasible_options = []
     for spec in manager.candidate_extra_specs(packable_remaining):
@@ -305,7 +315,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     if not feasible_options:
         warnings.append("Khong tim duoc phuong an phuong tien bo sung du chua phan hang du.")
         suggestions.append(f"Thu tang so luong {vehicle_label} da chon, dung {vehicle_label} lon hon hoac chia lo hang.")
-        return LoadingPlan(containers, len(items), remaining, warnings, suggestions)
+        return _plan_with_runtime(containers, len(items), remaining, warnings, suggestions, start)
 
     _, _, chosen_spec, extra_containers = sorted(feasible_options, key=lambda option: (option[0], option[1]))[0]
     containers.extend(extra_containers)
@@ -313,4 +323,4 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     suggestions.append(
         f"Tu bo sung {len(extra_containers)} {vehicle_label} {chosen_spec.name} cho phan hang du, uu tien it phuong tien nhat va kich thuoc nho nhat du chua."
     )
-    return LoadingPlan(containers, len(items), final_leftover, warnings, suggestions)
+    return _plan_with_runtime(containers, len(items), final_leftover, warnings, suggestions, start)

@@ -44,6 +44,14 @@ def sort_items_for_loading(items, config=None):
         "heaviest_first": lambda item: (-item.weight_kg, -item.volume_mm3),
         "longest_first": lambda item: (-max(item.length_mm, item.width_mm, item.height_mm), -item.volume_mm3),
         "highest_density_first": lambda item: (-(item.weight_kg / max(item.volume_mm3, 1.0)), -item.weight_kg),
+        "searates_like": lambda item: (
+            -item.priority,
+            -item.stackability,
+            -(item.length_mm * item.width_mm),
+            -item.volume_mm3,
+            -item.weight_kg,
+            -max(item.length_mm, item.width_mm, item.height_mm),
+        ),
     }
     base_key = sequence_keys.get(sequence)
     if base_key is None:
@@ -442,7 +450,7 @@ def _support_allowed(items, cargo, position, size, config):
         return False
     if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
         return False
-    if z <= 1e-6:
+    if z <= 1e-6 or cargo.allow_overhang:
         return True
     supported = 0.0
     for other in items:
@@ -471,7 +479,7 @@ def _support_allowed_indexed(state, cargo, position, size, config):
         return False
     if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
         return False
-    if z <= 1e-6:
+    if z <= 1e-6 or cargo.allow_overhang:
         return True
     supported = 0.0
     supports = {}
@@ -713,17 +721,80 @@ def beam_search_pack(container, cartons, config):
     return result
 
 
+def _placement_score(carton, space, size, state, config):
+    """Evaluate a candidate placement using the configured SeaRates-like weights."""
+    sw = getattr(config, "score_weights", {})
+    if not sw:
+        return 0.0
+    x, y, z = space.x, space.y, space.z
+    dx, dy, dz = size
+    L = state.container.length_mm
+    W = state.container.width_mm
+    H = state.container.height_mm
+    surface = 2 * (dx * dy + dy * dz + dx * dz)
+    contact = 0.0
+    if x <= 1e-6:
+        contact += dy * dz
+    if x + dx >= L - 1e-6:
+        contact += dy * dz
+    if y <= 1e-6:
+        contact += dx * dz
+    if y + dy >= W - 1e-6:
+        contact += dx * dz
+    if z <= 1e-6:
+        contact += dx * dy
+    contact_area = contact / max(surface, 1.0)
+    void_vol = max(0.0, (space.length - dx) * (space.width - dy) * (space.height - dz))
+    void_reduction = 1.0 - void_vol / max(space.volume, 1.0)
+    cx = x + dx / 2
+    cy = y + dy / 2
+    balance = 1.0 - (((cx - L / 2) / max(L / 2, 1.0)) ** 2 + ((cy - W / 2) / max(W / 2, 1.0)) ** 2) ** 0.5
+    accessibility = 1.0 - z / max(H, 1.0)
+    wall_alignment = 1.0 if (x <= 1e-6 or x + dx >= L - 1e-6 or y <= 1e-6 or y + dy >= W - 1e-6 or z <= 1e-6) else 0.0
+    future_potential = 1.0 - (void_vol / max(space.volume, 1.0))
+    support = 0.0
+    if sw.get("support_ratio", 0.0) > 0.0:
+        if z <= 1e-6:
+            support = 1.0
+        else:
+            cell_support = 0.0
+            for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+                for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+                    for other in state.top_cells.get((round(z, 3), gx, gy), ()):
+                        ox, oy, _ = other.position
+                        odx, ody, _ = other.size
+                        overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+                        if overlap > 0:
+                            cell_support += overlap
+            support = cell_support / max(dx * dy, 1.0)
+    layer_continuity = 0.0
+    if sw.get("layer_continuity", 0.0) > 0.0:
+        layer_continuity = 1.0 if z <= 1e-6 or round(z, 3) in state.top_surfaces else 0.0
+    return (
+        sw.get("contact_area", 0.0) * contact_area
+        + sw.get("void_reduction", 0.0) * void_reduction
+        + sw.get("weight_balance", 0.0) * balance
+        + sw.get("support_ratio", 0.0) * support
+        + sw.get("accessibility", 0.0) * accessibility
+        + sw.get("wall_alignment", 0.0) * wall_alignment
+        + sw.get("future_potential", 0.0) * future_potential
+        + sw.get("layer_continuity", 0.0) * layer_continuity
+    )
+
+
 def _completion_candidate_score(carton, space, size, state, config):
     """Score one legal placement without allocating a trial full layout."""
-    heuristic = getattr(config, "placement_strategy", "bottom_left_fill")
-    placement = _heuristic_key((space, size), heuristic)
     pattern = get_pattern(getattr(config, "packing_pattern", "balanced"))
     fill_weight = pattern.weights[0]
     volume = size[0] * size[1] * size[2] / max(
         state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0
     )
-    # Larger legal cartons first reduces unusable residual voids.  The tuple
-    # makes ties deterministic by the configured placement priority.
+    if getattr(config, "use_placement_scoring", False):
+        placement = _placement_score(carton, space, size, state, config)
+        return (volume * fill_weight, placement)
+    # Fast deterministic heuristic used by default.
+    heuristic = getattr(config, "placement_strategy", "bottom_left_fill")
+    placement = _heuristic_key((space, size), heuristic)
     return (volume * fill_weight, *placement)
 
 
