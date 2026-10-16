@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field
-from heapq import heappush, heappop
+from dataclasses import dataclass, field, replace
+from heapq import heappush, heappop, nlargest
 from itertools import permutations
+from time import monotonic
 
 from py3dbp import Bin, Item
 from py3dbp.main import START_POSITION, RotationType, intersect
@@ -39,19 +40,19 @@ def sort_items_for_loading(items, config=None):
 
     sequence = getattr(config, "packing_sequence", "largest_volume_first")
     sequence_keys = {
-        "largest_volume_first": lambda item: (-item.volume_mm3, -item.weight_kg),
-        "largest_base_first": lambda item: (-(item.length_mm * item.width_mm), -item.volume_mm3),
-        "heaviest_first": lambda item: (-item.weight_kg, -item.volume_mm3),
-        "longest_first": lambda item: (-max(item.length_mm, item.width_mm, item.height_mm), -item.volume_mm3),
-        "highest_density_first": lambda item: (-(item.weight_kg / max(item.volume_mm3, 1.0)), -item.weight_kg),
-        "searates_like": lambda item: (
-            -item.priority,
-            -item.stackability,
+        "searates_priority": lambda item: (
+            -getattr(item, "priority", 0),
+            -getattr(item, "stackability", 1),
             -(item.length_mm * item.width_mm),
             -item.volume_mm3,
             -item.weight_kg,
             -max(item.length_mm, item.width_mm, item.height_mm),
         ),
+        "largest_volume_first": lambda item: (-item.volume_mm3, -item.weight_kg),
+        "largest_base_first": lambda item: (-(item.length_mm * item.width_mm), -item.volume_mm3),
+        "heaviest_first": lambda item: (-item.weight_kg, -item.volume_mm3),
+        "longest_first": lambda item: (-max(item.length_mm, item.width_mm, item.height_mm), -item.volume_mm3),
+        "highest_density_first": lambda item: (-(item.weight_kg / max(item.volume_mm3, 1.0)), -item.weight_kg),
     }
     base_key = sequence_keys.get(sequence)
     if base_key is None:
@@ -106,7 +107,10 @@ def _stacking_constraints_allow(bin_obj, item, cargo, pivot, dimension, config):
             return False
     if base_z > 0:
         base_area = max(float(dimension[0]) * float(dimension[1]), 1.0)
-        if support_area / base_area < float(getattr(config, "minimum_support_ratio", 0.0)):
+        threshold = float(getattr(config, "stability_min_support", getattr(config, "minimum_support_ratio", 0.0)))
+        if cargo.overhang_allowed:
+            threshold = 0.0
+        if support_area / base_area < threshold:
             return False
     return True
 
@@ -360,8 +364,56 @@ class _FreeSpaceIndex:
             heappush(self.global_heap, entry)
         return selected
 
+    def fit_candidates_ordered(self, size, limit):
+        """Best-priority fitting spaces without scanning the whole index.
+
+        Pops the global heap in (z, volume, x, y) order until ``limit`` fitting
+        spaces are collected.  A bounded number of extra pops prevents
+        pathological scans when few spaces fit; stale heap entries are dropped
+        permanently, which also keeps the heap small over the run.  When the
+        load is small or degenerate the full index scan may still be cheaper —
+        callers fall back to ``all_fit_candidates`` for the completeness check.
+        """
+        selected = []
+        held = []
+        popped = 0
+        max_pops = max(limit * 8, 256)
+        while self.global_heap and len(selected) < limit and popped < max_pops:
+            entry = heappop(self.global_heap)
+            popped += 1
+            ident = entry[-1]
+            space = self.spaces.get(ident)
+            if space is None:
+                continue
+            held.append(entry)
+            if (size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6
+                    and size[2] <= space.height + 1e-6):
+                selected.append((ident, space))
+        for entry in held:
+            heappush(self.global_heap, entry)
+        return selected
+
     def all_fit_candidates(self, size):
         """Exhaustive feasibility iterator used by Vehicle Completion mode."""
+        # Bucket prefilter: a space can only contain ``size`` if each dimension
+        # class is at least the size's class (floor buckets are monotonic).
+        # Buckets that are too small in any axis are skipped wholesale, which
+        # removes the bulk of sliver spaces on large detailed loads.
+        kl, kw, kh = int(size[0] // 250), int(size[1] // 250), int(size[2] // 250)
+        if len(self.spaces) > 64 and len(self.buckets) > 1:
+            result = []
+            for (bl, bw, bh), heap in self.buckets.items():
+                if bl < kl or bw < kw or bh < kh:
+                    continue
+                for entry in heap:
+                    ident = entry[-1]
+                    space = self.spaces.get(ident)
+                    if (space is not None
+                            and size[0] <= space.length + 1e-6
+                            and size[1] <= space.width + 1e-6
+                            and size[2] <= space.height + 1e-6):
+                        result.append((ident, space))
+            return result
         return [
             (ident, space) for ident, space in self.spaces.items()
             if size[0] <= space.length + 1e-6
@@ -405,27 +457,58 @@ class _MutablePackingState:
         )
         self.weight = sum(item.cargo.weight_kg for item in self.items)
         self.used_volume = sum(item.size[0] * item.size[1] * item.size[2] for item in self.items)
+        self._moment = [
+            sum((item.position[0] + item.size[0] / 2.0) * item.cargo.weight_kg for item in self.items),
+            sum((item.position[1] + item.size[1] / 2.0) * item.cargo.weight_kg for item in self.items),
+            sum((item.position[2] + item.size[2] / 2.0) * item.cargo.weight_kg for item in self.items),
+        ]
+        self.cg = self._compute_cg()
         self.top_surfaces = {}
         self.top_cells = {}
+        self.right_cells = {}
+        self.front_cells = {}
+        self.free_min_z = min((space.z for space in self.free.spaces.values()), default=0.0)
+        self._score_weights = None
         for item in self.items:
             self._index_top(item)
 
+    def _compute_cg(self):
+        if self.weight <= 1e-9:
+            return (self.container.length_mm / 2.0, self.container.width_mm / 2.0, 0.0)
+        return (self._moment[0] / self.weight, self._moment[1] / self.weight, self._moment[2] / self.weight)
+
     def _index_top(self, item):
-        top = round(item.position[2] + item.size[2], 3)
+        x, y, z = item.position
+        dx, dy, dz = item.size
+        top = round(z + dz, 3)
+        right = round(x + dx, 3)
+        front = round(y + dy, 3)
         self.top_surfaces.setdefault(top, []).append(item)
-        x, y, _ = item.position
-        dx, dy, _ = item.size
-        for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
-            for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+        gx0, gx1 = int(x // 500), int((x + dx - 1e-6) // 500) + 1
+        gy0, gy1 = int(y // 500), int((y + dy - 1e-6) // 500) + 1
+        gz0, gz1 = int(z // 500), int((z + dz - 1e-6) // 500) + 1
+        for gx in range(gx0, gx1):
+            for gy in range(gy0, gy1):
                 self.top_cells.setdefault((top, gx, gy), []).append(item)
+        for gy in range(gy0, gy1):
+            for gz in range(gz0, gz1):
+                self.right_cells.setdefault((right, gy, gz), []).append(item)
+        for gx in range(gx0, gx1):
+            for gz in range(gz0, gz1):
+                self.front_cells.setdefault((front, gx, gz), []).append(item)
 
     def place(self, carton, ident, space, size):
         item = PackedItem(carton, (space.x, space.y, space.z), size)
         self.items.append(item)
         self.weight += carton.weight_kg
         self.used_volume += size[0] * size[1] * size[2]
+        self._moment[0] += (space.x + size[0] / 2.0) * carton.weight_kg
+        self._moment[1] += (space.y + size[1] / 2.0) * carton.weight_kg
+        self._moment[2] += (space.z + size[2] / 2.0) * carton.weight_kg
+        self.cg = self._compute_cg()
         self._index_top(item)
         self.free.split(ident, size)
+        self.free_min_z = min((space.z for space in self.free.spaces.values()), default=0.0)
 
 
 def _cargo_orientations(cargo):
@@ -450,7 +533,7 @@ def _support_allowed(items, cargo, position, size, config):
         return False
     if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
         return False
-    if z <= 1e-6 or cargo.allow_overhang:
+    if z <= 1e-6:
         return True
     supported = 0.0
     for other in items:
@@ -466,11 +549,20 @@ def _support_allowed(items, cargo, position, size, config):
         if other.cargo.max_stack_mass_kg is not None and cargo.weight_kg > other.cargo.max_stack_mass_kg + 1e-6:
             return False
         supported += overlap
-    return supported / max(dx * dy, 1.0) >= float(getattr(config, "minimum_support_ratio", 0.0))
+    threshold = float(getattr(config, "stability_min_support", getattr(config, "minimum_support_ratio", 0.0)))
+    if cargo.overhang_allowed:
+        threshold = 0.0
+    return supported / max(dx * dy, 1.0) >= threshold
 
 
 def _support_allowed_indexed(state, cargo, position, size, config):
-    """Support test restricted to the cached top surface at this Z level."""
+    """Support test restricted to the cached top surface at this Z level.
+
+    Positive results are memoized on the state: items are never removed or
+    moved, so support coverage at a fixed position can only grow.  Negative
+    results are deliberately not cached because a newly placed neighbour can
+    make a previously unsupported position legal.
+    """
     x, y, z = position
     dx, dy, dz = size
     if cargo.disable_stacking and z > 1e-6:
@@ -479,7 +571,17 @@ def _support_allowed_indexed(state, cargo, position, size, config):
         return False
     if cargo.max_layers is not None and z + 1e-6 >= dz * cargo.max_layers:
         return False
-    if z <= 1e-6 or cargo.allow_overhang:
+    if z <= 1e-6:
+        return True
+    threshold = float(getattr(config, "stability_min_support", getattr(config, "minimum_support_ratio", 0.0)))
+    if cargo.overhang_allowed:
+        threshold = 0.0
+    cache_key = (round(x, 3), round(y, 3), round(z, 3), size[0], size[1], size[2],
+                 float(cargo.weight_kg), threshold)
+    ok = getattr(state, "_support_ok", None)
+    if ok is None:
+        ok = state._support_ok = set()
+    elif cache_key in ok:
         return True
     supported = 0.0
     supports = {}
@@ -498,7 +600,203 @@ def _support_allowed_indexed(state, cargo, position, size, config):
         if other.cargo.max_stack_mass_kg is not None and cargo.weight_kg > other.cargo.max_stack_mass_kg + 1e-6:
             return False
         supported += overlap
-    return supported / max(dx * dy, 1.0) >= float(getattr(config, "minimum_support_ratio", 0.0))
+    if supported / max(dx * dy, 1.0) >= threshold:
+        ok.add(cache_key)
+        return True
+    return False
+
+
+def _support_ratio_indexed(state, position, size):
+    """Return the actual support ratio for a placement above the floor."""
+    x, y, z = position
+    dx, dy, dz = size
+    if z <= 1e-6:
+        return 1.0
+    supported = 0.0
+    supports = {}
+    for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+        for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+            for other in state.top_cells.get((round(z, 3), gx, gy), ()):
+                supports[id(other)] = other
+    for other in supports.values():
+        ox, oy, _ = other.position
+        odx, ody, _ = other.size
+        overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+        if overlap <= 0:
+            continue
+        supported += overlap
+    return supported / max(dx * dy, 1.0)
+
+
+def _placement_contact_area(state, position, size):
+    """Total touching surface area between a candidate and packed items.
+
+    Indexed version: the candidate always sits at a free-space corner, so it can
+    only touch packed items on its bottom (z), left (x) and back (y) faces.  The
+    state's face-cell indexes map each exposed face plane to the 500 mm cells it
+    covers, turning the O(n) item scan into O(neighbors).
+    """
+    x, y, z = position
+    dx, dy, dz = size
+    gx0, gx1 = int(x // 500), int((x + dx - 1e-6) // 500) + 1
+    gy0, gy1 = int(y // 500), int((y + dy - 1e-6) // 500) + 1
+    gz0, gz1 = int(z // 500), int((z + dz - 1e-6) // 500) + 1
+    contact = 0.0
+
+    below = {}
+    for gx in range(gx0, gx1):
+        for gy in range(gy0, gy1):
+            for other in state.top_cells.get((round(z, 3), gx, gy), ()):
+                below[id(other)] = other
+    for other in below.values():
+        ox, oy, _ = other.position
+        odx, ody, _ = other.size
+        contact += _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
+
+    left = {}
+    for gy in range(gy0, gy1):
+        for gz in range(gz0, gz1):
+            for other in state.right_cells.get((round(x, 3), gy, gz), ()):
+                left[id(other)] = other
+    for other in left.values():
+        _, oy, oz = other.position
+        _, ody, odz = other.size
+        contact += _overlap_1d(y, dy, oy, ody) * _overlap_1d(z, dz, oz, odz)
+
+    back = {}
+    for gx in range(gx0, gx1):
+        for gz in range(gz0, gz1):
+            for other in state.front_cells.get((round(y, 3), gx, gz), ()):
+                back[id(other)] = other
+    for other in back.values():
+        ox, _, oz = other.position
+        odx, _, odz = other.size
+        contact += _overlap_1d(x, dx, ox, odx) * _overlap_1d(z, dz, oz, odz)
+    return contact
+
+
+def _normalize_score_weights(config):
+    """Return a safe, normalized copy of the scoring weight map."""
+    defaults = {
+        "contact_area": 0.40,
+        "void_reduction": 0.20,
+        "weight_balance": 0.10,
+        "support_ratio": 0.10,
+        "accessibility": 0.10,
+        "wall_alignment": 0.05,
+        "future_packing_potential": 0.05,
+    }
+    user = getattr(config, "score_weights", None) or {}
+    merged = {**defaults, **{k: float(v) for k, v in user.items() if v is not None}}
+    total = sum(merged.values()) or 1.0
+    return {k: v / total for k, v in merged.items()}
+
+
+def _placement_score(cargo, space, size, state, config):
+    """Weighted SeaRates-style score for one legal placement candidate."""
+    x, y, z = float(space.x), float(space.y), float(space.z)
+    dx, dy, dz = float(size[0]), float(size[1]), float(size[2])
+    L, W, H = float(state.container.length_mm), float(state.container.width_mm), float(state.container.height_mm)
+    cached_weights = getattr(state, "_score_weights", None)
+    if cached_weights is None or cached_weights[0] is not config:
+        weights = _normalize_score_weights(config)
+        state._score_weights = (config, weights)
+    else:
+        weights = cached_weights[1]
+
+    # Contact surface with packed items and container boundaries
+    item_contact = _placement_contact_area(state, (x, y, z), (dx, dy, dz))
+    surface = 2.0 * (dx * dy + dx * dz + dy * dz)
+    contact_score = min(1.0, item_contact / max(surface, 1.0))
+
+    wall_contact = 0.0
+    if x <= 1e-6:
+        wall_contact += dy * dz
+    if x + dx >= L - 1e-6:
+        wall_contact += dy * dz
+    if y <= 1e-6:
+        wall_contact += dx * dz
+    if y + dy >= W - 1e-6:
+        wall_contact += dx * dz
+    if z <= 1e-6:
+        wall_contact += dx * dy
+    wall_score = wall_contact / max(surface, 1.0)
+
+    # Support / stability
+    support = _support_ratio_indexed(state, (x, y, z), (dx, dy, dz))
+    stability = support * (1.0 - z / max(H, 1.0))
+
+    # Void and remaining-space metrics
+    void_left = (space.length - dx) * (space.width - dy) * (space.height - dz)
+    space_vol = max(space.length * space.width * space.height, 1.0)
+    void_reduction = 1.0 - (max(void_left, 0.0) / space_vol)
+
+    remaining_l = max(L - x - dx, 0.0)
+    remaining_w = max(W - y - dy, 0.0)
+    remaining_h = max(H - z - dz, 0.0)
+    container_vol = L * W * H
+    remaining_score = 1.0 - (remaining_l * remaining_w * remaining_h) / max(container_vol, 1.0)
+    future_potential = 1.0 - (max(space.length - dx, 0.0) + max(space.width - dy, 0.0) + max(space.height - dz, 0.0)) / (L + W + H)
+
+    # Center of gravity and weight balance
+    item_weight = cargo.weight_kg
+    new_weight = state.weight + item_weight
+    if new_weight > 1e-9:
+        new_cgx = (state._moment[0] + (x + dx / 2.0) * item_weight) / new_weight
+        new_cgy = (state._moment[1] + (y + dy / 2.0) * item_weight) / new_weight
+        new_cgz = (state._moment[2] + (z + dz / 2.0) * item_weight) / new_weight
+    else:
+        new_cgx, new_cgy, new_cgz = L / 2.0, W / 2.0, 0.0
+    dist_xy = (((new_cgx - L / 2.0) / max(L / 2.0, 1.0)) ** 2 + ((new_cgy - W / 2.0) / max(W / 2.0, 1.0)) ** 2) ** 0.5
+    weight_balance = max(0.0, 1.0 - dist_xy)
+    low_cog = max(0.0, 1.0 - new_cgz / max(H, 1.0))
+
+    # Layer continuity (complete the current layer before climbing)
+    current_lowest_z = getattr(state, "free_min_z", None)
+    if current_lowest_z is None:
+        current_lowest_z = min((s.z for s in state.free.spaces.values()), default=0.0)
+    if abs(z - current_lowest_z) < 1e-6:
+        layer_continuity = 1.0
+    else:
+        layer_continuity = max(0.0, 1.0 - (z - current_lowest_z) / max(H, 1.0))
+
+    # Accessibility / unloading priority
+    direction = getattr(config, "load_direction", "inside_out")
+    unloading = getattr(cargo, "unloading_order", None)
+    if unloading is not None and direction == "inside_out":
+        # unload first -> load last -> place near door (x = L)
+        target_x = L if unloading <= 1 else 0.0
+        accessibility = 1.0 - abs((x + dx / 2.0) - target_x) / max(L, 1.0)
+    elif unloading is not None and direction == "door_to_inside":
+        target_x = 0.0 if unloading <= 1 else L
+        accessibility = 1.0 - abs((x + dx / 2.0) - target_x) / max(L, 1.0)
+    else:
+        accessibility = 0.5
+
+    components = {
+        "contact_area": contact_score,
+        "wall_alignment": wall_score,
+        "support_ratio": support,
+        "stability": stability,
+        "void_reduction": void_reduction,
+        "void_left": 1.0 - (space.length - dx) / max(space.length, 1.0),
+        "void_above": 1.0 - (space.height - dz) / max(space.height, 1.0),
+        "remaining_width": 1.0 - (space.width - dy) / max(space.width, 1.0),
+        "remaining_height": 1.0 - (space.height - dz) / max(space.height, 1.0),
+        "remaining_length": 1.0 - (space.length - dx) / max(space.length, 1.0),
+        "remaining_space": remaining_score,
+        "weight_balance": weight_balance,
+        "low_cog": low_cog,
+        "layer_continuity": layer_continuity,
+        "accessibility": accessibility,
+        "unloading_priority": accessibility,
+        "future_packing_potential": future_potential,
+    }
+
+    total = 0.0
+    for key, value in components.items():
+        total += weights.get(key, 0.0) * float(value)
+    return total
 
 
 def _prune_and_merge_spaces(spaces):
@@ -598,15 +896,34 @@ def _contact_area_for_item(item, items):
 
 
 def _average_support(items):
+    """Mean support ratio over all items, using a 500 mm top-face grid."""
     if not items:
         return 0.0
-    ratios = []
+    cells = {}
     for item in items:
-        if item.position[2] <= 1e-6:
-            ratios.append(1.0)
+        x, y, z = item.position
+        dx, dy, dz = item.size
+        top = round(z + dz, 3)
+        for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+            for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+                cells.setdefault((top, gx, gy), []).append(item)
+    total = 0.0
+    for item in items:
+        x, y, z = item.position
+        dx, dy, _ = item.size
+        if z <= 1e-6:
+            total += 1.0
             continue
-        ratios.append(min(1.0, _contact_area_for_item(item, items) / max(item.size[0] * item.size[1], 1.0)))
-    return sum(ratios) / len(ratios)
+        below = {}
+        for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
+            for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
+                for other in cells.get((round(z, 3), gx, gy), ()):
+                    below[id(other)] = other
+        supported = 0.0
+        for other in below.values():
+            supported += _overlap_1d(x, dx, other.position[0], other.size[0]) * _overlap_1d(y, dy, other.position[1], other.size[1])
+        total += min(1.0, supported / max(dx * dy, 1.0))
+    return total / len(items)
 
 
 def _heuristic_key(candidate, heuristic):
@@ -658,7 +975,9 @@ def _greedy_place(state, carton, config, orientation_cache=None):
     if not choices:
         return False
     strategy = getattr(config, "placement_strategy", "bottom_left_fill")
-    if strategy == "weight_balanced":
+    if strategy == "searates" or getattr(config, "enable_searates_scoring", True):
+        ident, space, size = max(choices, key=lambda choice: _placement_score(carton, choice[1], choice[2], state, config))
+    elif strategy == "weight_balanced":
         ident, space, size = max(
             choices,
             key=lambda choice: (
@@ -721,106 +1040,228 @@ def beam_search_pack(container, cartons, config):
     return result
 
 
-def _placement_score(carton, space, size, state, config):
-    """Evaluate a candidate placement using the configured SeaRates-like weights."""
-    sw = getattr(config, "score_weights", {})
-    if not sw:
-        return 0.0
-    x, y, z = space.x, space.y, space.z
-    dx, dy, dz = size
-    L = state.container.length_mm
-    W = state.container.width_mm
-    H = state.container.height_mm
-    surface = 2 * (dx * dy + dy * dz + dx * dz)
-    contact = 0.0
-    if x <= 1e-6:
-        contact += dy * dz
-    if x + dx >= L - 1e-6:
-        contact += dy * dz
-    if y <= 1e-6:
-        contact += dx * dz
-    if y + dy >= W - 1e-6:
-        contact += dx * dz
-    if z <= 1e-6:
-        contact += dx * dy
-    contact_area = contact / max(surface, 1.0)
-    void_vol = max(0.0, (space.length - dx) * (space.width - dy) * (space.height - dz))
-    void_reduction = 1.0 - void_vol / max(space.volume, 1.0)
-    cx = x + dx / 2
-    cy = y + dy / 2
-    balance = 1.0 - (((cx - L / 2) / max(L / 2, 1.0)) ** 2 + ((cy - W / 2) / max(W / 2, 1.0)) ** 2) ** 0.5
-    accessibility = 1.0 - z / max(H, 1.0)
-    wall_alignment = 1.0 if (x <= 1e-6 or x + dx >= L - 1e-6 or y <= 1e-6 or y + dy >= W - 1e-6 or z <= 1e-6) else 0.0
-    future_potential = 1.0 - (void_vol / max(space.volume, 1.0))
-    support = 0.0
-    if sw.get("support_ratio", 0.0) > 0.0:
-        if z <= 1e-6:
-            support = 1.0
-        else:
-            cell_support = 0.0
-            for gx in range(int(x // 500), int((x + dx - 1e-6) // 500) + 1):
-                for gy in range(int(y // 500), int((y + dy - 1e-6) // 500) + 1):
-                    for other in state.top_cells.get((round(z, 3), gx, gy), ()):
-                        ox, oy, _ = other.position
-                        odx, ody, _ = other.size
-                        overlap = _overlap_1d(x, dx, ox, odx) * _overlap_1d(y, dy, oy, ody)
-                        if overlap > 0:
-                            cell_support += overlap
-            support = cell_support / max(dx * dy, 1.0)
-    layer_continuity = 0.0
-    if sw.get("layer_continuity", 0.0) > 0.0:
-        layer_continuity = 1.0 if z <= 1e-6 or round(z, 3) in state.top_surfaces else 0.0
-    return (
-        sw.get("contact_area", 0.0) * contact_area
-        + sw.get("void_reduction", 0.0) * void_reduction
-        + sw.get("weight_balance", 0.0) * balance
-        + sw.get("support_ratio", 0.0) * support
-        + sw.get("accessibility", 0.0) * accessibility
-        + sw.get("wall_alignment", 0.0) * wall_alignment
-        + sw.get("future_potential", 0.0) * future_potential
-        + sw.get("layer_continuity", 0.0) * layer_continuity
-    )
-
-
 def _completion_candidate_score(carton, space, size, state, config):
     """Score one legal placement without allocating a trial full layout."""
-    pattern = get_pattern(getattr(config, "packing_pattern", "balanced"))
-    fill_weight = pattern.weights[0]
     volume = size[0] * size[1] * size[2] / max(
         state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0
     )
-    if getattr(config, "use_placement_scoring", False):
-        placement = _placement_score(carton, space, size, state, config)
-        return (volume * fill_weight, placement)
-    # Fast deterministic heuristic used by default.
+    if getattr(config, "enable_searates_scoring", True) or getattr(config, "placement_strategy", "") == "searates":
+        quality = _placement_score(carton, space, size, state, config)
+        # Volume is the primary key so the engine still commits big cartons first;
+        # the SeaRates-style quality score breaks ties and drives void filling.
+        return (volume, quality)
     heuristic = getattr(config, "placement_strategy", "bottom_left_fill")
     placement = _heuristic_key((space, size), heuristic)
+    pattern = get_pattern(getattr(config, "packing_pattern", "balanced"))
+    fill_weight = pattern.weights[0]
+    # Larger legal cartons first reduces unusable residual voids.  The tuple
+    # makes ties deterministic by the configured placement priority.
     return (volume * fill_weight, *placement)
 
 
-def _find_best_completion_candidate(state, remaining, config, orientation_cache, banned=()):
-    """Exhaustively test every remaining carton, orientation and free space."""
+def _pre_score(carton, space, size, state, config):
+    """Cheap score used to select the Top-N candidates for full _placement_score.
+
+    It rewards large volume and good fit between the item and the free space,
+    without any O(n) contact or support geometry loops.
+    """
+    container_vol = max(state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0)
+    placed_vol = size[0] * size[1] * size[2]
+    volume = placed_vol / container_vol
+    space_vol = max(space.length * space.width * space.height, 1.0)
+    fit = placed_vol / space_vol
+    return volume * (1.0 + fit) * 100.0
+
+
+def _placement_signature(carton):
+    """Attributes that decide which placements a carton can legally take.
+
+    Cartons sharing this signature produce identical candidate sets and
+    identical scores for every (space, orientation) pair, so evaluating the
+    group once per step is exact, not approximate.
+    """
+    return (
+        float(carton.length_mm), float(carton.width_mm), float(carton.height_mm),
+        float(carton.weight_kg),
+        bool(carton.tilt_to_length), bool(carton.tilt_to_width),
+        carton.max_layers, carton.max_stack_height_mm,
+        bool(carton.disable_stacking), bool(carton.overhang_allowed),
+        carton.unloading_order,
+    )
+
+
+def _find_best_completion_candidate(state, alive_groups, config, orientation_cache,
+                                    banned=(), deadline=None, remaining_count=None):
+    """Exhaustively test every remaining carton group, orientation and space.
+
+    ``alive_groups`` maps a placement signature to the still-unplaced cartons
+    that share it (dict id -> carton, in sorted order).  Groups that currently
+    have no dimension-feasible free space can never gain one later — free
+    spaces only shrink under guillotine splits — so they are removed from the
+    caller's dict and never re-scanned within this state.  Support-infeasible
+    groups are kept because new top surfaces can make them legal again.
+
+    Multi-stage filtering per evaluated group:
+    1) dimension-feasible (space, orientation) pairs via a per-step fit cache
+    2) cheap ``_pre_score`` ranking capped by ``per_group_score_cap``
+    3) support filter and full ``_placement_score`` on the surviving Top-N.
+    At most ``completion_lookahead`` distinct groups with legal placements are
+    fully scored per step; the loop only terminates without a candidate when
+    every alive group has been checked.
+    """
     best = None
-    banned = set(banned)
-    for carton_index, carton in enumerate(remaining):
+    banned = set(banned) if banned else ()
+    container_vol = max(state.container.length_mm * state.container.width_mm * state.container.height_mm, 1.0)
+    full_scores = 0
+    pre_candidates = 0
+    skipped_by_volume = 0
+    if remaining_count is None:
+        remaining_count = sum(len(members) for members in alive_groups.values())
+    limit = _dynamic_full_score_limit(config, remaining_count)
+    lookahead = max(1, int(getattr(config, "completion_lookahead", 4)))
+    per_group_cap = max(1, int(getattr(config, "per_group_score_cap", 64)))
+    fit_cache = {}
+    dead = []
+    scored_groups = 0
+    searates = getattr(config, "enable_searates_scoring", True) or getattr(config, "placement_strategy", "") == "searates"
+    heuristic = getattr(config, "placement_strategy", "bottom_left_fill")
+    volume_factor = 1.0 if searates else get_pattern(getattr(config, "packing_pattern", "balanced")).weights[0]
+
+    for group_rank, (sig, members) in enumerate(alive_groups.items()):
+        if deadline is not None and monotonic() >= deadline:
+            break
+        if not members:
+            dead.append(sig)
+            continue
+        carton = next(iter(members.values()))
+        default_winner = next(iter(members))
+        # Orientation permutations preserve bounding volume, so a group's best
+        # possible primary score is known before any space is inspected.
+        volume = carton.length_mm * carton.width_mm * carton.height_mm
+        vol_ratio = volume / container_vol
+        if best is not None and volume * volume_factor < best[0][0] - 1e-9:
+            skipped_by_volume += len(members)
+            continue
         if state.weight + carton.weight_kg > state.container.max_weight_kg + 1e-6:
+            # Weight only grows while packing: permanently infeasible here.
+            dead.append(sig)
             continue
         orientations = orientation_cache.get(carton.id)
         if orientations is None:
             orientations = _cargo_orientations(carton)
             orientation_cache[carton.id] = orientations
+        feasible = []
+        seen_pairs = set()
+        truncated = False
+        exhausted_sizes = getattr(state, "_exhausted_sizes", None)
+        if exhausted_sizes is None:
+            exhausted_sizes = state._exhausted_sizes = set()
         for size in orientations:
-            # Completion mode intentionally bypasses the fast candidate cap.
-            for ident, space in state.free.all_fit_candidates(size):
-                signature = (carton.id, round(space.x, 3), round(space.y, 3), round(space.z, 3), size)
-                if signature in banned:
+            # Dimension infeasibility is monotonic: free spaces only shrink, so
+            # a size with no fitting space can never gain one in this state.
+            if size in exhausted_sizes:
+                continue
+            fit_spaces = fit_cache.get(size)
+            if fit_spaces is None:
+                # Priority-ordered collection bounds the scan to the most
+                # promising spaces; an empty result triggers one exhaustive
+                # pass that proves no orientation of this size fits anywhere.
+                fit_spaces = state.free.fit_candidates_ordered(size, per_group_cap)
+                if not fit_spaces:
+                    fit_spaces = state.free.all_fit_candidates(size)
+                    if not fit_spaces:
+                        exhausted_sizes.add(size)
+                elif len(fit_spaces) >= per_group_cap:
+                    truncated = True
+                fit_cache[size] = fit_spaces
+            for ident, space in fit_spaces:
+                pre_candidates += 1
+                seen_pairs.add((ident, size))
+                feasible.append((ident, space, size))
+        if not feasible:
+            dead.append(sig)
+            continue
+        if len(feasible) > per_group_cap:
+            feasible.sort(key=lambda candidate: _pre_score(carton, candidate[1], candidate[2], state, config), reverse=True)
+            truncated = True
+            del feasible[per_group_cap:]
+        group_best = None
+        for ident, space, size in feasible:
+            if deadline is not None and monotonic() >= deadline:
+                break
+            if banned:
+                sx, sy, sz = round(space.x, 3), round(space.y, 3), round(space.z, 3)
+                winner_id = next(
+                    (member_id for member_id in members
+                     if (member_id, sx, sy, sz, size) not in banned),
+                    None,
+                )
+                if winner_id is None:
+                    skipped_by_volume += 1
                     continue
-                if not _support_allowed_indexed(state, carton, (space.x, space.y, space.z), size, config):
+            else:
+                winner_id = default_winner
+            if not _support_allowed_indexed(state, carton, (space.x, space.y, space.z), size, config):
+                continue
+            if getattr(config, "adaptive_search", True) and full_scores >= limit:
+                continue
+            if searates:
+                score = (vol_ratio, _placement_score(carton, space, size, state, config))
+            else:
+                score = (vol_ratio * volume_factor, *_heuristic_key((space, size), heuristic))
+            full_scores += 1
+            if group_best is None or score > group_best[0]:
+                group_best = (score, -group_rank, winner_id, sig, ident, space, size)
+        if group_best is None and truncated:
+            # Every collected candidate failed support or was banned.  Capping
+            # could have hidden a legal placement beyond the priority horizon,
+            # so run one exhaustive pass over the unscored pairs before this
+            # group is allowed to produce nothing for the step.
+            for size in orientations:
+                if deadline is not None and monotonic() >= deadline:
+                    break
+                if size in exhausted_sizes:
                     continue
-                score = _completion_candidate_score(carton, space, size, state, config)
-                candidate = (score, -carton_index, carton_index, ident, space, size)
-                if best is None or candidate[:2] > best[:2]:
-                    best = candidate
+                for ident, space in state.free.all_fit_candidates(size):
+                    if (ident, size) in seen_pairs:
+                        continue
+                    seen_pairs.add((ident, size))
+                    pre_candidates += 1
+                    if banned:
+                        sx, sy, sz = round(space.x, 3), round(space.y, 3), round(space.z, 3)
+                        winner_id = next(
+                            (member_id for member_id in members
+                             if (member_id, sx, sy, sz, size) not in banned),
+                            None,
+                        )
+                        if winner_id is None:
+                            continue
+                    else:
+                        winner_id = default_winner
+                    if not _support_allowed_indexed(state, carton, (space.x, space.y, space.z), size, config):
+                        continue
+                    if getattr(config, "adaptive_search", True) and full_scores >= limit:
+                        continue
+                    if searates:
+                        score = (vol_ratio, _placement_score(carton, space, size, state, config))
+                    else:
+                        score = (vol_ratio * volume_factor, *_heuristic_key((space, size), heuristic))
+                    full_scores += 1
+                    if group_best is None or score > group_best[0]:
+                        group_best = (score, -group_rank, winner_id, sig, ident, space, size)
+        if group_best is not None:
+            scored_groups += 1
+            if best is None or group_best[0] > best[0]:
+                best = group_best
+            if scored_groups >= lookahead:
+                break
+    for sig in dead:
+        alive_groups.pop(sig, None)
+    # Diagnostics to let the engine measure search cost.
+    state._search_stats = getattr(state, "_search_stats", {})
+    state._search_stats["full_scores"] = state._search_stats.get("full_scores", 0) + full_scores
+    state._search_stats["pre_candidates"] = state._search_stats.get("pre_candidates", 0) + pre_candidates
+    state._search_stats["skipped_by_volume"] = state._search_stats.get("skipped_by_volume", 0) + skipped_by_volume
     return best
 
 
@@ -843,22 +1284,58 @@ def _rebuild_completion_state(container, history):
     return state
 
 
-def _complete_until_stalled(state, remaining, history, config, orientation_cache, banned=()):
-    """Place the globally best legal carton, then retry all remaining cartons."""
+def _complete_until_stalled(state, remaining, history, config, orientation_cache,
+                            banned=(), deadline=None, signature_cache=None):
+    """Place the globally best legal carton, then retry all remaining cartons.
+
+    Remaining cartons are bucketed once by placement signature.  Each step
+    evaluates a bounded lookahead window of distinct groups instead of
+    rescanning every carton; groups that can never fit again are dropped
+    permanently, so "no legal placement" is still only concluded after every
+    remaining carton has effectively been checked.
+    """
     remaining = list(remaining)
     history = list(history)
-    while remaining:
-        candidate = _find_best_completion_candidate(state, remaining, config, orientation_cache, banned)
+    if signature_cache is None:
+        signature_cache = {}
+    alive = {}
+    for carton in remaining:
+        sig = signature_cache.get(carton.id)
+        if sig is None:
+            sig = _placement_signature(carton)
+            signature_cache[carton.id] = sig
+        members = alive.get(sig)
+        if members is None:
+            alive[sig] = members = {}
+        members[carton.id] = carton
+    placed_ids = set()
+    unplaced_count = len(remaining)
+    while unplaced_count:
+        if deadline is not None and monotonic() >= deadline:
+            break
+        per_call = None
+        if deadline is not None:
+            remaining_time = deadline - monotonic()
+            per_call = monotonic() + min(remaining_time, max(0.5, 5.0 * remaining_time / max(1, unplaced_count)))
+        candidate = _find_best_completion_candidate(
+            state, alive, config, orientation_cache, banned, per_call, unplaced_count
+        )
         if candidate is None:
             break
-        _, _, carton_index, ident, space, size = candidate
-        carton = remaining.pop(carton_index)
+        _, _, carton_id, sig, ident, space, size = candidate
+        members = alive[sig]
+        carton = members.pop(carton_id)
+        if not members:
+            del alive[sig]
+        placed_ids.add(carton_id)
+        unplaced_count -= 1
         state.place(carton, ident, space, size)
         history.append((carton, (space.x, space.y, space.z), size))
-    return state, remaining, history
+    return state, [carton for carton in remaining if carton.id not in placed_ids], history
 
 
-def _recover_tail(container, state, remaining, history, config, orientation_cache, count):
+def _recover_tail(container, state, remaining, history, config, orientation_cache,
+                  count, deadline=None, signature_cache=None):
     """Undo a bounded tail, search alternative placements, and rollback safely."""
     count = min(max(1, count), len(history))
     if not count:
@@ -871,28 +1348,37 @@ def _recover_tail(container, state, remaining, history, config, orientation_cach
     banned = {(carton.id, round(position[0], 3), round(position[1], 3), round(position[2], 3), size)
               for carton, position, size in tail}
     trial, retry_remaining, retry_history = _complete_until_stalled(
-        trial, retry_cartons, checkpoint, config, orientation_cache, banned
+        trial, retry_cartons, checkpoint, config, orientation_cache, banned,
+        deadline=deadline, signature_cache=signature_cache,
     )
     if _completion_score(trial, config) > _completion_score(state, config):
         return trial, retry_remaining, retry_history
     return None
 
 
-def vehicle_completion_pack(container, cartons, config):
+def vehicle_completion_pack(container, cartons, config, deadline=None):
     """Commercial vehicle-completion state machine.
 
     A vehicle is only returned after an exhaustive legal-placement pass, local
     recovery and incremental repacking all fail to create another placement.
     """
+    if deadline is None:
+        deadline = monotonic() + float(getattr(config, "time_budget_seconds", 60.0))
     state = _MutablePackingState(container, exhaustive=True)
     remaining = list(sort_items_for_loading(cartons, config))
     history = []
     orientations = {}
+    signatures = {}
     local_attempted = False
     incremental_attempted = False
 
     while True:
-        state, remaining, history = _complete_until_stalled(state, remaining, history, config, orientations)
+        if monotonic() >= deadline:
+            break
+        state, remaining, history = _complete_until_stalled(
+            state, remaining, history, config, orientations,
+            deadline=deadline, signature_cache=signatures,
+        )
         if not remaining:
             break
 
@@ -903,6 +1389,7 @@ def vehicle_completion_pack(container, cartons, config):
             recovered = _recover_tail(
                 container, state, remaining, history, config, orientations,
                 int(getattr(config, "recovery_placement_count", 12)),
+                deadline=deadline, signature_cache=signatures,
             )
             if recovered is not None:
                 state, remaining, history = recovered
@@ -915,6 +1402,7 @@ def vehicle_completion_pack(container, cartons, config):
             recovered = _recover_tail(
                 container, state, remaining, history, config, orientations,
                 min(8, int(getattr(config, "recovery_placement_count", 12))),
+                deadline=deadline, signature_cache=signatures,
             )
             local_attempted = True
             if recovered is not None:
@@ -926,6 +1414,7 @@ def vehicle_completion_pack(container, cartons, config):
             recovered = _recover_tail(
                 container, state, remaining, history, config, orientations,
                 int(getattr(config, "incremental_repack_count", 5)),
+                deadline=deadline, signature_cache=signatures,
             )
             incremental_attempted = True
             if recovered is not None:
@@ -938,13 +1427,190 @@ def vehicle_completion_pack(container, cartons, config):
 
     result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
     result.score = _layout_score(result, container, len(cartons), config)
+    result.history = history
+    result.remaining = remaining
+    result.search_stats = getattr(state, "_search_stats", {})
     return result, remaining
+
+
+def _tail_repack_score(layout, container, total, config):
+    """Score a candidate repack layout using the original config weights."""
+    return _layout_score(layout, container, total, config)
+
+
+def _dynamic_full_score_limit(config, item_count):
+    """Return the maximum number of candidates that will receive a full score."""
+    hard = int(getattr(config, "max_full_score_candidates", 1500))
+    if not getattr(config, "adaptive_search", True):
+        return hard
+    table = getattr(config, "max_full_score_candidates_map", {100: 300, 300: 600, 700: 1000})
+    for threshold, value in sorted(table.items()):
+        if item_count < threshold:
+            return min(hard, value)
+    return min(hard, 1500)
+
+
+def _auto_derive_config(config, items):
+    """Derive an effective config for mode='auto' based on problem size and mix."""
+    if getattr(config, "mode", "") != "auto":
+        return config
+    count = len(items)
+    vols = [getattr(item, "volume_m3", item.length_mm * item.width_mm * item.height_mm / 1e9) for item in items]
+    min_vol = min(vols) if vols else 1.0
+    max_vol = max(vols) if vols else 1.0
+    ratio = max_vol / max(min_vol, 1e-9)
+
+    # Large homogeneous loads -> fast heuristic. Mixed or medium -> Searates quality.
+    if count >= 300 or ratio <= 1.5:
+        time_budget = min(60.0, max(4.0, count * 0.025))
+        return replace(
+            config,
+            packing_sequence="largest_volume_first",
+            placement_strategy="bottom_left_fill",
+            packing_pattern="balanced",
+            enable_searates_scoring=False,
+            enable_repacking=False,
+            adaptive_search=False,
+            time_budget_seconds=float(time_budget),
+            max_full_score_candidates=min(300, int(getattr(config, "max_full_score_candidates", 1500))),
+        )
+
+    time_budget = min(60.0, max(8.0, count * 0.12 + 2.0))
+    full_score_limit = _dynamic_full_score_limit(config, count)
+    return replace(
+        config,
+        packing_sequence="searates_priority",
+        placement_strategy="searates",
+        packing_pattern="balanced",
+        enable_searates_scoring=True,
+        enable_repacking=True,
+        adaptive_search=True,
+        time_budget_seconds=float(time_budget),
+        max_full_score_candidates=int(full_score_limit),
+    )
+
+
+def _used_volume(layout):
+    return sum(item.size[0] * item.size[1] * item.size[2] for item in layout.items)
+
+
+def _active_repack_tail_sizes(config, fill_pct):
+    """Choose repack depth based on how full the fast pack already is."""
+    tail_sizes = list(getattr(config, "repack_tail_sizes", (5, 12, 25)))
+    if fill_pct >= 95.0:
+        return ()
+    if fill_pct >= 85.0:
+        return (tail_sizes[0],)
+    if fill_pct >= 65.0:
+        return tail_sizes
+    return tail_sizes + [40]
+
+
+def repack_container(container: ContainerSpec, items, config=None):
+    """Pack + adaptive multi-strategy tail repacking to reduce leftover.
+
+    This is a safe backtracking wrapper: every trial starts from a checkpoint,
+    never discards a better result, and respects the configured time budget.
+    """
+    config = config or LoadingConfig()
+    start = monotonic()
+    deadline = start + float(getattr(config, "time_budget_seconds", 60.0))
+    base_layout, base_leftover = vehicle_completion_pack(container, items, config, deadline=deadline)
+    base_layout.score = _tail_repack_score(base_layout, container, len(items), config)
+    best_layout, best_leftover = base_layout, base_leftover
+    best_score = base_layout.score
+
+    if not getattr(config, "enable_repacking", True) or not base_layout.history:
+        return best_layout, best_leftover
+
+    # Trigger decision: only spend time on tail repack if there are leftovers
+    # and the layout has not already reached the configured targets.
+    total = len(items)
+    packed = total - len(base_leftover)
+    if packed == total:
+        return best_layout, best_leftover
+    used = _used_volume(best_layout)
+    capacity = container.length_mm * container.width_mm * container.height_mm
+    util_pct = (used / max(capacity, 1.0)) * 100.0
+    capacity_m3 = capacity / 1e9
+    remaining_m3 = capacity_m3 - used / 1e9
+    if remaining_m3 <= float(getattr(config, "repack_remaining_volume_min", 1.0)):
+        return best_layout, best_leftover
+    if util_pct >= float(getattr(config, "repack_utilization_threshold", 0.90)) * 100.0:
+        return best_layout, best_leftover
+    score_target = float(getattr(config, "repack_score_target", 0.0))
+    if score_target > 0 and best_score >= score_target:
+        return best_layout, best_leftover
+
+    # Adaptive tail depth based on how full the base pack already is.
+    active_tails = _active_repack_tail_sizes(config, util_pct)
+    if not active_tails:
+        return best_layout, best_leftover
+    strategies = list(getattr(config, "repack_strategy_variants", ("best_volume_fit", "best_contact_area", "bottom_left_fill")))
+    epsilon = float(getattr(config, "repack_epsilon", 0.001))
+    prev_score = best_score
+    improvement_found = True
+
+    for tail_size in active_tails:
+        if monotonic() >= deadline - 1.0:
+            break
+        if len(best_layout.history) < tail_size:
+            continue
+        for strategy in strategies:
+            if monotonic() >= deadline - 1.0:
+                break
+            repack_cfg = replace(
+                config,
+                placement_strategy=strategy,
+                enable_searates_scoring=(strategy == "searates"),
+                enable_repacking=False,
+                adaptive_search=True,
+            )
+            if repack_cfg == config:
+                continue
+            checkpoint = best_layout.history[:-tail_size]
+            tail = best_layout.history[-tail_size:]
+            trial = _rebuild_completion_state(container, checkpoint)
+            if trial is None:
+                continue
+            retry_cartons = list(best_leftover) + [carton for carton, _, _ in tail]
+            banned = {
+                (carton.id, round(position[0], 3), round(position[1], 3), round(position[2], 3), size)
+                for carton, position, size in tail
+            }
+            orientations = {}
+            signatures = {}
+            call_budget = (deadline - monotonic()) / max(1, len(active_tails) * len(strategies))
+            call_deadline = monotonic() + max(0.5, call_budget)
+            trial, retry_remaining, retry_history = _complete_until_stalled(
+                trial, retry_cartons, checkpoint, repack_cfg, orientations, banned,
+                deadline=call_deadline, signature_cache=signatures,
+            )
+            trial_layout = _BeamLayout(trial.items, list(trial.free.spaces.values()), weight=trial.weight)
+            trial_layout.score = _tail_repack_score(trial_layout, container, len(items), config)
+            trial_layout.search_stats = getattr(trial, "_search_stats", {})
+            trial_layout.history = retry_history
+            trial_layout.remaining = retry_remaining
+            if trial_layout.score > best_score:
+                best_score = trial_layout.score
+                best_layout = trial_layout
+                best_leftover = retry_remaining
+                improvement_found = True
+        # Early stop if this depth did not improve enough
+        if not improvement_found or (best_score - prev_score) < epsilon:
+            break
+        prev_score = best_score
+        improvement_found = False
+
+    return best_layout, best_leftover
 
 
 def pack_container(container: ContainerSpec, items, role="Selected", config=None):
     """Complete one vehicle before allowing the caller to create another."""
-    config = config or LoadingConfig()
-    layout, completion_leftovers = vehicle_completion_pack(container, items, config)
+    config = _auto_derive_config(config or LoadingConfig(), items)
+    start = monotonic()
+    layout, completion_leftovers = repack_container(container, items, config)
+    runtime = monotonic() - start
     packed = layout.items
     if getattr(config, "load_direction", "inside_out") == "door_to_inside":
         packed = [PackedItem(item.cargo, _normalize_position(item.position, item.size, container, config), item.size) for item in packed]
@@ -959,4 +1625,33 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
     # vehicle_completion_pack reaches this point only after exhaustive search,
     # recovery, local repacking and retry have all completed.
     result.completion_verified = True
+
+    used = sum(item.size[0] * item.size[1] * item.size[2] for item in packed)
+    capacity = max(container.length_mm * container.width_mm * container.height_mm, 1.0)
+    total_weight = max(sum(item.cargo.weight_kg for item in packed), 1e-9)
+    if total_weight > 0:
+        cgx = sum((item.position[0] + item.size[0] / 2) * item.cargo.weight_kg for item in packed) / total_weight
+        cgy = sum((item.position[1] + item.size[1] / 2) * item.cargo.weight_kg for item in packed) / total_weight
+        cgz = sum((item.position[2] + item.size[2] / 2) * item.cargo.weight_kg for item in packed) / total_weight
+    else:
+        cgx = cgy = cgz = 0.0
+    support = _average_support(packed)
+    low_cog = max(0.0, 1.0 - cgz / max(container.height_mm, 1))
+    stability = support * low_cog
+    search_stats = getattr(layout, "search_stats", {})
+    result.diagnostics = {
+        "utilization_pct": (used / capacity) * 100.0,
+        "weight_utilization_pct": (total_weight / max(container.max_weight_kg, 1.0)) * 100.0,
+        "container_count": 1,
+        "empty_space_m3": (capacity - used) / 1e9,
+        "number_of_layers": len({round(item.position[2], 3) for item in packed}),
+        "support_ratio": support,
+        "center_of_gravity": (round(cgx, 2), round(cgy, 2), round(cgz, 2)),
+        "stability_score": stability,
+        "packing_score": getattr(layout, "score", 0.0),
+        "number_of_extreme_points": len(layout.spaces),
+        "runtime_s": round(runtime, 3),
+        "candidate_count": search_stats.get("pre_candidates", 0),
+        "full_scores": search_stats.get("full_scores", 0),
+    }
     return result, leftovers
