@@ -4,7 +4,7 @@ from math import sqrt
 from time import monotonic
 
 from .manager import ContainerManager
-from .models import LoadingConfig, LoadingPlan
+from .models import LoadingConfig, LoadingPlan, PackedContainer
 from .packing import can_fit_item, pack_container
 from .patterns import get_pattern
 
@@ -226,8 +226,11 @@ class VehicleDrivenEngine:
         before_count = len(self.remaining)
         packed, leftovers = _pack_fullest_vehicle(spec, self.remaining, role, self.config)
         # A vehicle completion certificate is required before another vehicle
-        # can be opened.  This prevents any first-failure transition.
-        if not getattr(packed, "completion_verified", False):
+        # can be opened — except when the search ended on the time budget:
+        # the returned layout is still fully valid, so it is committed, but it
+        # is not a proven-complete vehicle and its diagnostics say so.
+        termination = (getattr(packed, "diagnostics", {}) or {}).get("search_termination")
+        if not getattr(packed, "completion_verified", False) and termination != "deadline":
             raise RuntimeError("Vehicle completion was not verified before commit.")
         if packed.items:
             self.vehicles.append(packed)
@@ -260,17 +263,91 @@ def _pack_repeating_spec(spec, items, config):
     return engine.commit_repeating(spec, getattr(config, "max_additional_containers", 10))
 
 
-def _plan_with_runtime(containers, requested_count, leftover, warnings, suggestions, start, diagnostics=None):
-    runtime = monotonic() - start
-    diagnostics = dict(diagnostics or {})
-    diagnostics["runtime_seconds"] = runtime
-    diagnostics["container_count"] = len(containers)
-    diagnostics["leftover_count"] = len(leftover)
-    return LoadingPlan(containers, requested_count, leftover, warnings, suggestions, diagnostics)
+def _repack_container_fast(spec, items, role, config):
+    """Fast deterministic repack used by rebalancing moves."""
+    fast_cfg = _replace_config(
+        config,
+        mode="manual",
+        packing_sequence="largest_volume_first",
+        placement_strategy="bottom_left_fill",
+        packing_pattern="balanced",
+        enable_searates_scoring=False,
+        enable_repacking=False,
+        enable_cross_rebalancing=False,
+        enable_root_diversification=False,
+        time_budget_seconds=2.0,
+    )
+    return pack_container(spec, items, role=role, config=fast_cfg)
+
+
+def _rebalance_if_enabled(plan, config):
+    if not getattr(config, "enable_cross_rebalancing", False) or len(plan.containers) < 2:
+        return plan
+    deadline = monotonic() + float(getattr(config, "cross_rebalance_budget", 10.0))
+    max_moves = int(getattr(config, "cross_rebalance_max_moves", 50))
+    moves = 0
+    improved = True
+
+    while improved and moves < max_moves and monotonic() < deadline:
+        improved = False
+        # Prioritize moving from the lowest-utilization container first.
+        indices = sorted(range(len(plan.containers)), key=lambda i: plan.containers[i].volume_pct)
+        for src_idx in indices:
+            if monotonic() >= deadline:
+                break
+            src = plan.containers[src_idx]
+            if not src.items:
+                continue
+            src_cargos = [it.cargo for it in src.items]
+            # Try to move to any earlier container.
+            for dst_idx in range(len(plan.containers)):
+                if dst_idx == src_idx:
+                    continue
+                if monotonic() >= deadline:
+                    break
+                dst = plan.containers[dst_idx]
+                # Candidate groups: single item, then pairs.
+                for group_size in (1, 2):
+                    if len(src_cargos) < group_size:
+                        continue
+                    order = sorted(range(len(src_cargos)), key=lambda i: src_cargos[i].volume_mm3, reverse=True)
+                    for start in range(min(4, len(order) - group_size + 1)):
+                        group_pos = order[start:start + group_size]
+                        group = [src_cargos[p] for p in group_pos]
+                        remaining_src = [src_cargos[p] for p in range(len(src_cargos)) if p not in group_pos]
+                        # Quick dimensional fit check on the target container.
+                        if not all(can_fit_item(item, dst.spec) for item in group):
+                            continue
+                        new_dst, dst_left = _repack_container_fast(dst.spec, [it.cargo for it in dst.items] + group, dst.role, config)
+                        new_src, src_left = _repack_container_fast(src.spec, remaining_src, src.role, config) if remaining_src else (PackedContainer(spec=src.spec, items=[], role=src.role), [])
+                        if not remaining_src:
+                            new_src, src_left = PackedContainer(spec=src.spec, items=[], role=src.role), []
+                        if new_dst is None:
+                            continue
+                        new_total = len(new_dst.items) + len(new_src.items)
+                        old_total = len(dst.items) + len(src.items)
+                        # Accept if we keep or increase packed count and do not lose items.
+                        if new_total > old_total or (new_total == old_total and len(new_src.items) == 0 and len(src.items) > 0):
+                            plan.containers[dst_idx] = new_dst
+                            plan.containers[src_idx] = new_src
+                            if src_left:
+                                plan.leftover_items = list(plan.leftover_items) + src_left
+                            moves += 1
+                            improved = True
+                            break
+                    if improved:
+                        break
+                if improved:
+                    break
+            if improved:
+                break
+
+    # Remove empty containers that are no longer needed.
+    plan.containers = [c for c in plan.containers if c.items]
+    return plan
 
 
 def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=True, config=None):
-    start = monotonic()
     config = config or LoadingConfig()
     warnings = []
     suggestions = []
@@ -290,7 +367,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
 
     if not remaining:
         suggestions.append("Hoan thanh: toan bo hang da duoc xep trong so container da chon.")
-        return _plan_with_runtime(containers, len(items), [], warnings, suggestions, start)
+        return _rebalance_if_enabled(LoadingPlan(containers, len(items), [], warnings, suggestions), config)
 
     impossible_for_catalog = [
         item for item in remaining
@@ -304,7 +381,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     packable_remaining = [item for item in remaining if item not in impossible_for_catalog]
     if not allow_auto_add or not packable_remaining:
         suggestions.append("Can tach hang qua kho, doi phuong tien chuyen dung hoac cap nhat catalog container.")
-        return _plan_with_runtime(containers, len(items), remaining, warnings, suggestions, start)
+        return _rebalance_if_enabled(LoadingPlan(containers, len(items), remaining, warnings, suggestions), config)
 
     feasible_options = []
     for spec in manager.candidate_extra_specs(packable_remaining):
@@ -315,7 +392,7 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     if not feasible_options:
         warnings.append("Khong tim duoc phuong an phuong tien bo sung du chua phan hang du.")
         suggestions.append(f"Thu tang so luong {vehicle_label} da chon, dung {vehicle_label} lon hon hoac chia lo hang.")
-        return _plan_with_runtime(containers, len(items), remaining, warnings, suggestions, start)
+        return _rebalance_if_enabled(LoadingPlan(containers, len(items), remaining, warnings, suggestions), config)
 
     _, _, chosen_spec, extra_containers = sorted(feasible_options, key=lambda option: (option[0], option[1]))[0]
     containers.extend(extra_containers)
@@ -323,4 +400,4 @@ def optimize_loading(items, selected_spec, selected_quantity=1, allow_auto_add=T
     suggestions.append(
         f"Tu bo sung {len(extra_containers)} {vehicle_label} {chosen_spec.name} cho phan hang du, uu tien it phuong tien nhat va kich thuoc nho nhat du chua."
     )
-    return _plan_with_runtime(containers, len(items), final_leftover, warnings, suggestions, start)
+    return _rebalance_if_enabled(LoadingPlan(containers, len(items), final_leftover, warnings, suggestions), config)

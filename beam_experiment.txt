@@ -1,0 +1,22 @@
+Label                  Mode                     Wall    CPU ExCnt  Pack  Left  Gap  Supp  Stab Term       Valid
+--------------------------------------------------------------------------------------------------------------
+seed2111_base          BASE                   0.0040 0.0000     8     8     0    0 1.000 0.560 complete    True
+seed2111_beam12        BEAM(bw=12,bl=8)       0.1239 0.1094     8     8     0    0 1.000 0.460 beam        True
+seed2111_base          BASE                   0.0056 0.0156     8     8     0    0 1.000 0.560 complete    True
+seed2111_beam16        BEAM(bw=16,bl=8)       0.1277 0.1250     8     8     0    0 1.000 0.460 beam        True
+seed2111_base          BASE                   0.0035 0.0000     8     8     0    0 1.000 0.560 complete    True
+seed2111_beam24        BEAM(bw=24,bl=8)       0.1914 0.2031     8     8     0    0 1.000 0.460 beam        True
+seed2138_base          BASE                   0.0348 0.0156     8     7     1    1 1.000 0.777 exhausted   True
+seed2138_beam12        BEAM(bw=12,bl=8)       0.0896 0.0938     8     7     1    1 1.000 0.795 beam        True
+seed2138_base          BASE                   0.0362 0.0469     8     7     1    1 1.000 0.777 exhausted   True
+seed2138_beam16        BEAM(bw=16,bl=8)       0.0841 0.0781     8     8     0    0 1.000 0.603 beam        True
+seed2138_base          BASE                   0.0311 0.0312     8     7     1    1 1.000 0.777 exhausted   True
+seed2138_beam24        BEAM(bw=24,bl=8)       0.1193 0.1094     8     8     0    0 1.000 0.603 beam        True
+tiny_uniform           BASE                   0.0008 0.0156     5     5     0    0 1.000 0.750 complete    True
+tiny_uniform           BEAM(bw=12,bl=5)       0.0069 0.0000     5     5     0    0 1.000 0.550 beam        True
+tiny_mixed             BASE                   0.0022 0.0000     6     6     0    0 1.000 0.643 complete    True
+tiny_mixed             BEAM(bw=12,bl=6)       0.0337 0.0312     6     6     0    0 1.000 0.500 beam        True
+tiny_constrained       BASE                   0.0010 0.0000     5     5     0    0 1.000 0.817 complete    True
+tiny_constrained       BEAM(bw=12,bl=5)       0.0133 0.0000     5     5     0    0 1.000 0.760 beam        True
+tiny_tilt              BASE                   0.0004 0.0000     3     3     0    0 1.000 0.750 complete    True
+tiny_tilt              BEAM(bw=12,bl=3)       0.0019 0.0000     3     3     0    0 1.000 0.550 beam        True

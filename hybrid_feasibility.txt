@@ -1,0 +1,20 @@
+Label              Mode         Wall    CPU   Pack   Left   Util%  Supp  Stab Term       Valid   Impr   Trig Reason             Trials   Gen   Acc   Rej  ImpP
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+seed2111           BASE         0.01   0.00      8      0   36.30 1.000 0.560 complete    True  False  False                         0     0     0     0     0
+seed2111           HYBRID       0.00   0.02      8      0   36.30 1.000 0.560 complete    True  False  False no_leftover             0     0     0     0     0
+seed2138           BASE         0.04   0.03      7      1   56.85 1.000 0.777 exhausted   True  False  False                         0     0     0     0     0
+seed2138           HYBRID       0.41   0.41      8      0   74.45 1.000 0.621 complete    True   True   True                         5     5     1     4     1
+tiny_uniform       BASE         0.00   0.00      5      0   31.25 1.000 0.750 complete    True  False  False                         0     0     0     0     0
+tiny_uniform       HYBRID       0.00   0.00      5      0   31.25 1.000 0.750 complete    True  False  False no_leftover             0     0     0     0     0
+tiny_mixed         BASE         0.00   0.00      6      0   31.25 1.000 0.643 complete    True  False  False                         0     0     0     0     0
+tiny_mixed         HYBRID       0.00   0.02      6      0   31.25 1.000 0.643 complete    True  False  False no_leftover             0     0     0     0     0
+tiny_constrained   BASE         0.00   0.00      5      0   17.34 1.000 0.817 complete    True  False  False                         0     0     0     0     0
+tiny_constrained   HYBRID       0.00   0.00      5      0   17.34 1.000 0.817 complete    True  False  False no_leftover             0     0     0     0     0
+tiny_tilt          BASE         0.00   0.00      3      0   25.65 1.000 0.750 complete    True  False  False                         0     0     0     0     0
+tiny_tilt          HYBRID       0.00   0.00      3      0   25.65 1.000 0.750 complete    True  False  False no_leftover             0     0     0     0     0
+mixed_160          BASE         0.22   0.20    120     40   82.98 1.000 0.521 exhausted   True  False  False                         0     0     0     0     0
+mixed_160          HYBRID       0.21   0.19    120     40   82.98 1.000 0.521 exhausted   True  False  False remaining_too_large      0     0     0     0     0
+mixed_500          BASE         0.24   0.23    260    240   84.87 1.000 0.557 exhausted   True  False  False                         0     0     0     0     0
+mixed_500          HYBRID       0.27   0.27    260    240   84.87 1.000 0.557 exhausted   True  False  False remaining_too_large      0     0     0     0     0
+mixed_2000         BASE         0.59   0.58    570   1430   92.89 1.000 0.398 exhausted   True  False  False                         0     0     0     0     0
+mixed_2000         HYBRID       0.62   0.62    570   1430   92.89 1.000 0.398 exhausted   True  False  False remaining_too_large      0     0     0     0     0

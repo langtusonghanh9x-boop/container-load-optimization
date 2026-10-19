@@ -509,6 +509,10 @@ class _MutablePackingState:
         self._index_top(item)
         self.free.split(ident, size)
         self.free_min_z = min((space.z for space in self.free.spaces.values()), default=0.0)
+        if carton.disable_stacking or carton.max_stack_mass_kg is not None:
+            # A restrictive supporter can make previously-cached support
+            # verdicts illegal; cached "True" entries must not outlive it.
+            self._support_ok = set()
 
 
 def _cargo_orientations(cargo):
@@ -561,7 +565,9 @@ def _support_allowed_indexed(state, cargo, position, size, config):
     Positive results are memoized on the state: items are never removed or
     moved, so support coverage at a fixed position can only grow.  Negative
     results are deliberately not cached because a newly placed neighbour can
-    make a previously unsupported position legal.
+    make a previously unsupported position legal.  The cache is cleared in
+    ``place()`` whenever a restrictive supporter (disable_stacking or a stack
+    mass limit) lands, since it can retroactively make a cached "True" illegal.
     """
     x, y, z = position
     dx, dy, dz = size
@@ -962,10 +968,10 @@ def _greedy_place(state, carton, config, orientation_cache=None):
     choices = []
     orientations = _cargo_orientations(carton)
     if orientation_cache is not None:
-        orientations = orientation_cache.get(carton.id)
+        orientations = orientation_cache.get(id(carton))
         if orientations is None:
             orientations = _cargo_orientations(carton)
-            orientation_cache[carton.id] = orientations
+            orientation_cache[id(carton)] = orientations
     for size in orientations:
         if current_weight + carton.weight_kg > state.container.max_weight_kg + 1e-6:
             break
@@ -992,22 +998,53 @@ def _greedy_place(state, carton, config, orientation_cache=None):
     return True
 
 
-def beam_search_pack(container, cartons, config):
-    """Hybrid packing: bounded Beam prefix followed by O(n) greedy packing."""
-    beam = [_BeamLayout(spaces=[_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])]
+def beam_search_pack(container, cartons, config, initial_state=None):
+    """Hardened bounded Beam Search prototype.
+
+    - Respects ``time_budget_seconds``.
+    - Keeps the best valid partial layout if the deadline is hit.
+    - Ranks by packed count first, then by the existing layout score.
+    - Reports ``complete``, ``deadline`` or ``beam`` termination and basic
+      diagnostics so the result has the same shape as ``vehicle_completion_pack``.
+    - If ``initial_state`` is given, search continues from that valid partial
+      packing state.  ``cartons`` must be the remaining cartons to place.
+    """
+    deadline = monotonic() + float(getattr(config, "time_budget_seconds", 60.0))
+    initial_items = list(getattr(initial_state, "items", []))
+    total = len(cartons) + len(initial_items)
     beam_width = max(1, int(getattr(config, "beam_width", 12)))
-    total = len(cartons)
-    beam_limit = min(total, max(0, int(getattr(config, "beam_carton_limit", 20))))
+    beam_limit = min(len(cartons), max(0, int(getattr(config, "beam_carton_limit", 20))))
     orientation_cache = {}
+    timed_out = False
+    expanded_states = 0
+    retained_states = 0
+
+    if initial_state is not None:
+        init_layout = _BeamLayout(
+            list(initial_state.items),
+            list(initial_state.free.spaces.values()),
+            weight=initial_state.weight,
+        )
+        init_layout.score = _layout_score(init_layout, container, total, config)
+        beam = [init_layout]
+    else:
+        beam = [_BeamLayout(spaces=[_FreeSpace(0.0, 0.0, 0.0, float(container.length_mm), float(container.width_mm), float(container.height_mm))])]
+
     for carton in cartons[:beam_limit]:
+        if monotonic() >= deadline:
+            timed_out = True
+            break
         new_beam = []
         for layout in beam:
+            if monotonic() >= deadline:
+                timed_out = True
+                break
             candidates = []
             current_weight = layout.weight
-            orientations = orientation_cache.get(carton.id)
+            orientations = orientation_cache.get(id(carton))
             if orientations is None:
                 orientations = _cargo_orientations(carton)
-                orientation_cache[carton.id] = orientations
+                orientation_cache[id(carton)] = orientations
             for index, space in enumerate(layout.spaces):
                 for size in orientations:
                     if size[0] <= space.length + 1e-6 and size[1] <= space.width + 1e-6 and size[2] <= space.height + 1e-6:
@@ -1017,27 +1054,66 @@ def beam_search_pack(container, cartons, config):
             # later carton from using a compatible void.
             new_beam.append(_BeamLayout(list(layout.items), list(layout.spaces), layout.score, layout.weight))
             for index, space, size in candidates:
+                if monotonic() >= deadline:
+                    timed_out = True
+                    break
                 placed = PackedItem(carton, (space.x, space.y, space.z), size)
                 candidate = _BeamLayout(list(layout.items) + [placed], _split_free_space(layout, index, size), weight=layout.weight + carton.weight_kg)
                 candidate.score = _layout_score(candidate, container, total, config)
                 new_beam.append(candidate)
+            expanded_states += 1
+            if timed_out:
+                break
+        if timed_out:
+            break
         # Deduplicate equivalent layouts before retaining the global top-N.
         unique = {}
         for layout in new_beam:
             signature = tuple(sorted((item.cargo.id, tuple(round(value, 3) for value in item.position), tuple(round(value, 3) for value in item.size)) for item in layout.items))
             if signature not in unique or layout.score > unique[signature].score:
                 unique[signature] = layout
-        beam = sorted(unique.values(), key=lambda layout: layout.score, reverse=True)[:beam_width]
-    # Commit the strongest partial layout, then use fast Largest/Best-Fit/BLF
-    # packing for all remaining cartons.  This prevents a Beam explosion on
-    # detailed loads with thousands of cartons.
-    best = max(beam, key=lambda layout: layout.score)
+        # Rank primarily by packed count, then by the layout score, so the best
+        # valid layout is always retained and the beam favours completeness.
+        beam = sorted(unique.values(), key=lambda layout: (len(layout.items), layout.score), reverse=True)[:beam_width]
+        retained_states += len(beam)
+
+    if beam:
+        best = max(beam, key=lambda layout: (len(layout.items), layout.score))
+    else:
+        best = _BeamLayout()
+
+    # Greedy completion for any cartons outside the beam prefix, respecting
+    # the same deadline.
     state = _MutablePackingState(container, best.spaces, best.items)
-    for carton in cartons[beam_limit:]:
-        _greedy_place(state, carton, config, orientation_cache)
+    if not timed_out:
+        for carton in cartons[beam_limit:]:
+            if monotonic() >= deadline:
+                timed_out = True
+                break
+            _greedy_place(state, carton, config, orientation_cache)
+
     result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
     result.score = _layout_score(result, container, total, config)
-    return result
+    result.history = [(item.cargo, item.position, item.size) for item in result.items]
+    packed_ids = {id(item.cargo) for item in result.items}
+    leftovers = [carton for carton in cartons if id(carton) not in packed_ids]
+    if len(result.items) == total:
+        termination = "complete"
+    elif timed_out:
+        termination = "deadline"
+    else:
+        # Search completed within its configured beam scope but did not place
+        # every carton.  This is bounded, not a full exhaustive proof.
+        termination = "beam"
+    result.termination = termination
+    result.search_stats = {
+        "pre_candidates": expanded_states,
+        "retained_states": retained_states,
+        "beam_width": beam_width,
+        "beam_limit": beam_limit,
+        "timed_out": timed_out,
+    }
+    return result, leftovers
 
 
 def _completion_candidate_score(carton, space, size, state, config):
@@ -1084,7 +1160,7 @@ def _placement_signature(carton):
         float(carton.length_mm), float(carton.width_mm), float(carton.height_mm),
         float(carton.weight_kg),
         bool(carton.tilt_to_length), bool(carton.tilt_to_width),
-        carton.max_layers, carton.max_stack_height_mm,
+        carton.max_layers, carton.max_stack_height_mm, carton.max_stack_mass_kg,
         bool(carton.disable_stacking), bool(carton.overhang_allowed),
         carton.unloading_order,
     )
@@ -1136,20 +1212,22 @@ def _find_best_completion_candidate(state, alive_groups, config, orientation_cac
         carton = next(iter(members.values()))
         default_winner = next(iter(members))
         # Orientation permutations preserve bounding volume, so a group's best
-        # possible primary score is known before any space is inspected.
+        # possible primary score is known before any space is inspected.  The
+        # score tuple's primary key is the *ratio*, so the prune must compare
+        # like with like.
         volume = carton.length_mm * carton.width_mm * carton.height_mm
         vol_ratio = volume / container_vol
-        if best is not None and volume * volume_factor < best[0][0] - 1e-9:
+        if best is not None and vol_ratio * volume_factor < best[0][0] - 1e-9:
             skipped_by_volume += len(members)
             continue
         if state.weight + carton.weight_kg > state.container.max_weight_kg + 1e-6:
             # Weight only grows while packing: permanently infeasible here.
             dead.append(sig)
             continue
-        orientations = orientation_cache.get(carton.id)
+        orientations = orientation_cache.get(id(carton))
         if orientations is None:
             orientations = _cargo_orientations(carton)
-            orientation_cache[carton.id] = orientations
+            orientation_cache[id(carton)] = orientations
         feasible = []
         seen_pairs = set()
         truncated = False
@@ -1192,8 +1270,8 @@ def _find_best_completion_candidate(state, alive_groups, config, orientation_cac
             if banned:
                 sx, sy, sz = round(space.x, 3), round(space.y, 3), round(space.z, 3)
                 winner_id = next(
-                    (member_id for member_id in members
-                     if (member_id, sx, sy, sz, size) not in banned),
+                    (member_key for member_key, member in members.items()
+                     if (member.id, sx, sy, sz, size) not in banned),
                     None,
                 )
                 if winner_id is None:
@@ -1230,8 +1308,8 @@ def _find_best_completion_candidate(state, alive_groups, config, orientation_cac
                     if banned:
                         sx, sy, sz = round(space.x, 3), round(space.y, 3), round(space.z, 3)
                         winner_id = next(
-                            (member_id for member_id in members
-                             if (member_id, sx, sy, sz, size) not in banned),
+                            (member_key for member_key, member in members.items()
+                             if (member.id, sx, sy, sz, size) not in banned),
                             None,
                         )
                         if winner_id is None:
@@ -1300,16 +1378,19 @@ def _complete_until_stalled(state, remaining, history, config, orientation_cache
         signature_cache = {}
     alive = {}
     for carton in remaining:
-        sig = signature_cache.get(carton.id)
+        sig = signature_cache.get(id(carton))
         if sig is None:
             sig = _placement_signature(carton)
-            signature_cache[carton.id] = sig
+            signature_cache[id(carton)] = sig
         members = alive.get(sig)
         if members is None:
             alive[sig] = members = {}
-        members[carton.id] = carton
-    placed_ids = set()
+        # Members are keyed by object identity: user-supplied CargoItems may
+        # legitimately share the same id string, and must never be merged.
+        members[id(carton)] = carton
+    placed = set()
     unplaced_count = len(remaining)
+    exhausted = False
     while unplaced_count:
         if deadline is not None and monotonic() >= deadline:
             break
@@ -1321,17 +1402,21 @@ def _complete_until_stalled(state, remaining, history, config, orientation_cache
             state, alive, config, orientation_cache, banned, per_call, unplaced_count
         )
         if candidate is None:
+            # The grouped scan checked every alive group (including the
+            # exhaustive fallbacks) without finding a legal placement.
+            exhausted = True
             break
-        _, _, carton_id, sig, ident, space, size = candidate
+        _, _, carton_key, sig, ident, space, size = candidate
         members = alive[sig]
-        carton = members.pop(carton_id)
+        carton = members.pop(carton_key)
         if not members:
             del alive[sig]
-        placed_ids.add(carton_id)
+        placed.add(id(carton))
         unplaced_count -= 1
         state.place(carton, ident, space, size)
         history.append((carton, (space.x, space.y, space.z), size))
-    return state, [carton for carton in remaining if carton.id not in placed_ids], history
+    state._completion_exhausted = exhausted or not unplaced_count
+    return state, [carton for carton in remaining if id(carton) not in placed], history
 
 
 def _recover_tail(container, state, remaining, history, config, orientation_cache,
@@ -1364,13 +1449,65 @@ def vehicle_completion_pack(container, cartons, config, deadline=None):
     """
     if deadline is None:
         deadline = monotonic() + float(getattr(config, "time_budget_seconds", 60.0))
-    state = _MutablePackingState(container, exhaustive=True)
     remaining = list(sort_items_for_loading(cartons, config))
+
+    # Root diversification: try the top first-placement candidates and commit
+    # to the strongest branch.  Controlled by config; disabled by default.
+    if getattr(config, "enable_root_diversification", False) and remaining:
+        branch_width = int(getattr(config, "root_branch_width", 3))
+        first = remaining[0]
+        base_state = _MutablePackingState(container, exhaustive=True)
+        first_orientations = _cargo_orientations(first)
+        first_placements = []
+        for size in first_orientations:
+            for ident, space in base_state.free.all_fit_candidates(size):
+                if base_state.weight + first.weight_kg > base_state.container.max_weight_kg:
+                    continue
+                if not _support_allowed_indexed(base_state, first, (space.x, space.y, space.z), size, config):
+                    continue
+                ps = _pre_score(first, space, size, base_state, config)
+                first_placements.append((ps, ident, space, size))
+        first_placements.sort(key=lambda x: x[0], reverse=True)
+        first_placements = first_placements[:branch_width]
+        best_branch = None
+        for _, ident, space, size in first_placements:
+            if monotonic() >= deadline:
+                break
+            checkpoint = [(first, (space.x, space.y, space.z), size)]
+            trial = _rebuild_completion_state(container, checkpoint)
+            if trial is None:
+                continue
+            branch_orient = {}
+            branch_sigs = {}
+            trial, branch_remaining, branch_history = _complete_until_stalled(
+                trial, remaining[1:], checkpoint, config, branch_orient,
+                deadline=deadline, signature_cache=branch_sigs,
+            )
+            layout = _BeamLayout(trial.items, list(trial.free.spaces.values()), weight=trial.weight)
+            layout.score = _layout_score(layout, container, len(cartons), config)
+            layout.history = branch_history
+            layout.remaining = branch_remaining
+            if not branch_remaining:
+                term = "complete"
+            elif getattr(trial, "_completion_exhausted", False) and monotonic() < deadline:
+                term = "exhausted"
+            else:
+                term = "deadline"
+            layout.termination = term
+            layout.search_stats = getattr(trial, "_search_stats", {})
+            layout.search_stats["termination"] = term
+            if best_branch is None or layout.score > best_branch.score:
+                best_branch = layout
+        if best_branch is not None:
+            return best_branch, best_branch.remaining
+
+    state = _MutablePackingState(container, exhaustive=True)
     history = []
     orientations = {}
     signatures = {}
     local_attempted = False
     incremental_attempted = False
+    termination = "deadline"
 
     while True:
         if monotonic() >= deadline:
@@ -1380,6 +1517,7 @@ def vehicle_completion_pack(container, cartons, config, deadline=None):
             deadline=deadline, signature_cache=signatures,
         )
         if not remaining:
+            termination = "complete"
             break
 
         # Phase 0: below target, recover a configurable recent placement tail
@@ -1423,13 +1561,23 @@ def vehicle_completion_pack(container, cartons, config, deadline=None):
 
         # All cartons/orientations/free-spaces were searched, then both local
         # phases and their retry passes completed without a legal placement.
+        # "exhausted" is only claimed when the grouped completion scan itself
+        # ran to its exhaustive conclusion inside the configured search scope;
+        # a leftover caused by the deadline is reported as such instead.
+        termination = (
+            "exhausted"
+            if getattr(state, "_completion_exhausted", False) and monotonic() < deadline
+            else "deadline"
+        )
         break
 
     result = _BeamLayout(state.items, list(state.free.spaces.values()), weight=state.weight)
     result.score = _layout_score(result, container, len(cartons), config)
     result.history = history
     result.remaining = remaining
+    result.termination = termination
     result.search_stats = getattr(state, "_search_stats", {})
+    result.search_stats["termination"] = termination
     return result, remaining
 
 
@@ -1588,9 +1736,21 @@ def repack_container(container: ContainerSpec, items, config=None):
             )
             trial_layout = _BeamLayout(trial.items, list(trial.free.spaces.values()), weight=trial.weight)
             trial_layout.score = _tail_repack_score(trial_layout, container, len(items), config)
-            trial_layout.search_stats = getattr(trial, "_search_stats", {})
+            base_stats = getattr(best_layout, "search_stats", {}) or {}
+            trial_stats = getattr(trial, "_search_stats", {}) or {}
+            merged_stats = dict(trial_stats)
+            for key, value in base_stats.items():
+                if isinstance(value, (int, float)) and isinstance(merged_stats.get(key), (int, float)):
+                    merged_stats[key] += value
+            trial_layout.search_stats = merged_stats
             trial_layout.history = retry_history
             trial_layout.remaining = retry_remaining
+            trial_layout.termination = (
+                "complete" if not retry_remaining
+                else "exhausted" if getattr(trial, "_completion_exhausted", False) and monotonic() < call_deadline
+                else "deadline"
+            )
+            trial_layout.search_stats["termination"] = trial_layout.termination
             if trial_layout.score > best_score:
                 best_score = trial_layout.score
                 best_layout = trial_layout
@@ -1615,16 +1775,17 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
     if getattr(config, "load_direction", "inside_out") == "door_to_inside":
         packed = [PackedItem(item.cargo, _normalize_position(item.position, item.size, container, config), item.size) for item in packed]
 
-    packed_ids = {item.cargo.id for item in packed}
-    leftovers = [item for item in completion_leftovers if item.id not in packed_ids]
+    packed_objects = {id(item.cargo) for item in packed}
+    leftovers = [item for item in completion_leftovers if id(item) not in packed_objects]
     result = PackedContainer(spec=container, items=packed, role=role)
     # Kept on the plan so the global engine can compare the exact weighted
     # Beam score after each complete candidate layout is generated.
     result.optimization_score = layout.score
     result.score = layout.score
-    # vehicle_completion_pack reaches this point only after exhaustive search,
-    # recovery, local repacking and retry have all completed.
-    result.completion_verified = True
+    # "Verified" means the completion search either placed every carton or
+    # conclusively checked all legal placements.  A deadline-terminated search
+    # still returns a valid layout but must not claim verification.
+    result.completion_verified = getattr(layout, "termination", "") in ("complete", "exhausted")
 
     used = sum(item.size[0] * item.size[1] * item.size[2] for item in packed)
     capacity = max(container.length_mm * container.width_mm * container.height_mm, 1.0)
@@ -1653,5 +1814,11 @@ def pack_container(container: ContainerSpec, items, role="Selected", config=None
         "runtime_s": round(runtime, 3),
         "candidate_count": search_stats.get("pre_candidates", 0),
         "full_scores": search_stats.get("full_scores", 0),
+        "skipped_by_volume": search_stats.get("skipped_by_volume", 0),
+        # "complete" = every carton placed, "exhausted" = proven no legal
+        # placement remains inside the configured free-space search scope,
+        # "deadline" = the time budget expired before exhaustion was proven.
+        "search_termination": getattr(layout, "termination", "unknown"),
+        "completion_exhausted": getattr(layout, "termination", "") in ("complete", "exhausted"),
     }
     return result, leftovers

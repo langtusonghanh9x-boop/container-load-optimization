@@ -149,6 +149,12 @@ class LoadingConfig:
     repack_remaining_volume_min: float = 1.0
     recovery_placement_count: int = 12
     incremental_repack_count: int = 5
+    enable_cross_rebalancing: bool = False
+    cross_rebalance_budget: float = 10.0
+    cross_rebalance_max_moves: int = 50
+    enable_root_diversification: bool = False
+    root_branch_width: int = 3
+    root_depth: int = 1
     enable_searates_scoring: bool = True
     score_weights: Dict = field(default_factory=lambda: {
         "contact_area": 0.40,

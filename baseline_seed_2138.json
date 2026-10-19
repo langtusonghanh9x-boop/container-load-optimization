@@ -1,0 +1,141 @@
+{
+  "seed": 2138,
+  "container": {
+    "name": "Mini-2.5x1.5x1.5",
+    "length_mm": 2500,
+    "width_mm": 1500,
+    "height_mm": 1500,
+    "max_weight_kg": 10000
+  },
+  "wall_s": 0.0442,
+  "packed_count": 7,
+  "leftover_count": 1,
+  "exhaustive_count": 8,
+  "exhaustive_vol_mm3": 4188000000.0,
+  "termination": "exhausted",
+  "score": 39.84950272852221,
+  "packed_items": [
+    {
+      "order": 1,
+      "id": "s1_0",
+      "name": "sku1",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "size": [
+        1000.0,
+        1200.0,
+        900.0
+      ],
+      "weight_kg": 19.0,
+      "volume_mm3": 1080000000.0
+    },
+    {
+      "order": 2,
+      "id": "s7_0",
+      "name": "sku7",
+      "position": [
+        1000.0,
+        0.0,
+        0.0
+      ],
+      "size": [
+        900.0,
+        1200.0,
+        1000.0
+      ],
+      "weight_kg": 17.0,
+      "volume_mm3": 1080000000.0
+    },
+    {
+      "order": 3,
+      "id": "s3_0",
+      "name": "sku3",
+      "position": [
+        1900.0,
+        0.0,
+        0.0
+      ],
+      "size": [
+        600.0,
+        1100.0,
+        1500.0
+      ],
+      "weight_kg": 29.0,
+      "volume_mm3": 990000000.0
+    },
+    {
+      "order": 4,
+      "id": "s0_0",
+      "name": "sku0",
+      "position": [
+        0.0,
+        1200.0,
+        0.0
+      ],
+      "size": [
+        200.0,
+        200.0,
+        300.0
+      ],
+      "weight_kg": 14.0,
+      "volume_mm3": 12000000.0
+    },
+    {
+      "order": 5,
+      "id": "s6_0",
+      "name": "sku6",
+      "position": [
+        200.0,
+        1200.0,
+        0.0
+      ],
+      "size": [
+        200.0,
+        200.0,
+        300.0
+      ],
+      "weight_kg": 12.0,
+      "volume_mm3": 12000000.0
+    },
+    {
+      "order": 6,
+      "id": "s4_0",
+      "name": "sku4",
+      "position": [
+        400.0,
+        1200.0,
+        0.0
+      ],
+      "size": [
+        200.0,
+        200.0,
+        300.0
+      ],
+      "weight_kg": 36.0,
+      "volume_mm3": 12000000.0
+    },
+    {
+      "order": 7,
+      "id": "s5_0",
+      "name": "sku5",
+      "position": [
+        600.0,
+        1200.0,
+        0.0
+      ],
+      "size": [
+        200.0,
+        200.0,
+        300.0
+      ],
+      "weight_kg": 31.0,
+      "volume_mm3": 12000000.0
+    }
+  ],
+  "leftover_ids": [
+    "s2_0"
+  ]
+}
