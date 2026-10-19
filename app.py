@@ -722,7 +722,7 @@ if st.session_state.current_tab == "PRODUCTS":
             invalid_order_rows.append(i + 1)
         
         settings_key = f"show_settings_{product_key_version}_{i}"
-        if cols[9].button("⚙️", key=f"settings_{product_key_version}_{i}"):
+        if cols[9].button("", icon=":material/settings:", key=f"settings_{product_key_version}_{i}", help="Packing settings"):
             st.session_state[settings_key] = not st.session_state.get(settings_key, False)
 
         tilt_to_length = prod.get("tilt_to_length", False)
@@ -759,7 +759,7 @@ if st.session_state.current_tab == "PRODUCTS":
             max_stack_height = height_value if use_height else None
             disable_stacking = setting_cols[4].checkbox("Disable stacking", value=disable_stacking, key=f"disable_stacking_{product_key_version}_{i}")
 
-        if cols[10].button("🗑️", key=f"del_{product_key_version}_{i}"):
+        if cols[10].button("", icon=":material/delete:", key=f"del_{product_key_version}_{i}", help="Delete product"):
             to_delete = i
             
         temp_list.append({
@@ -940,7 +940,7 @@ elif st.session_state.current_tab == "CONTAINERS & TRUCKS":
                 key=f"edit_m_{custom_idx}"
             )
             # Delete button
-            if edit_cols[5].button("🗑️", key=f"del_{custom_idx}"):
+            if edit_cols[5].button("", icon=":material/delete:", key=f"del_{custom_idx}", help="Delete custom vehicle"):
                 st.session_state.custom_containers.pop(custom_idx)
                 with open('custom_containers.json', 'w') as f:
                     json.dump(st.session_state.custom_containers, f, indent=2)
