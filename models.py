@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from math import pi
 from typing import Dict, List, Optional, Tuple
 
@@ -25,6 +25,13 @@ class CargoItem:
     max_stack_height_mm: Optional[float] = None
     disable_stacking: bool = False
     shape: str = "box"
+    # Alias used by some UI/data sources; maps onto the canonical
+    # `overhang_allowed` field at init time without becoming its own field.
+    allow_overhang: InitVar[Optional[bool]] = None
+
+    def __post_init__(self, allow_overhang: Optional[bool]) -> None:
+        if allow_overhang is not None:
+            object.__setattr__(self, "overhang_allowed", bool(allow_overhang))
 
     @property
     def volume_mm3(self) -> float:

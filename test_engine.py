@@ -276,5 +276,25 @@ class TestDiagnostics(unittest.TestCase):
         self.assertGreater(d["utilization_pct"], 0)
 
 
+class TestCargoItemInit(unittest.TestCase):
+    def test_allow_overhang_alias(self):
+        # Regression: CargoItem should accept the `allow_overhang` keyword
+        # used by some UI/data sources and map it to `overhang_allowed`.
+        c = CargoItem("a", "a", 100, 200, 300, 1, allow_overhang=True)
+        self.assertTrue(c.overhang_allowed)
+
+    def test_overhang_allowed_preserved_when_no_alias(self):
+        c = CargoItem("a", "a", 100, 200, 300, 1, overhang_allowed=True)
+        self.assertTrue(c.overhang_allowed)
+
+    def test_product_rows_accept_allow_overhang_key(self):
+        items = product_rows_to_cargo_items([{
+            "name": "x", "l": 100, "w": 100, "h": 100, "wt": 1, "qty": 1,
+            "allow_overhang": True,
+        }])
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0].overhang_allowed)
+
+
 if __name__ == "__main__":
     unittest.main()

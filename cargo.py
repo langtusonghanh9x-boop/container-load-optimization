@@ -28,10 +28,13 @@ def product_rows_to_cargo_items(products):
                 weight_kg=float(product.get("wt", 0)),
                 color=product.get("color", "#7f8c8d"),
                 cargo_type=cargo_type,
-                priority=int(product.get("priority", 0) or 0),
-                stackability=int(product.get("stackability", 100) or 100),
-                allow_overhang=bool(product.get("allow_overhang", False)),
                 loading_order=product.get("loading_order"),
+                unloading_order=product.get("unloading_order"),
+                priority=int(product.get("priority", 0)),
+                stackability=int(product.get("stackability", 1)),
+                overhang_allowed=bool(
+                    product.get("overhang_allowed", product.get("allow_overhang", False))
+                ),
                 tilt_to_length=bool(product.get("tilt_to_length", False)),
                 tilt_to_width=bool(product.get("tilt_to_width", False)),
                 max_layers=product.get("max_layers") or None,
